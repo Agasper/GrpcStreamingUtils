@@ -1,0 +1,15 @@
+syntax = "proto3";
+package grpc_streaming_utils.tests;
+option csharp_namespace = "GrpcStreamingUtils.Tests.Proto";
+
+message TestRequest {
+  string value = 1;
+}
+
+message TestResponse {
+  string result = 1;
+}
+
+message VoidRequest {
+  string value = 1;
+}
