@@ -5,7 +5,8 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Niarru.GrpcStreamingUtils</RootNamespace>
-    <Version>0.0.1</Version>
+    <PackageId>Niarru.GrpcStreamingUtils</PackageId>
+    <Version>0.0.2</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -22,6 +23,11 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="GrpcStreamingUtils.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Proto\streaming_rpc.proto" Pack="true" PackagePath="content\protos\" />
+    <None Include="build\Niarru.GrpcStreamingUtils.targets" Pack="true" PackagePath="build\" />
   </ItemGroup>
 
 </Project>

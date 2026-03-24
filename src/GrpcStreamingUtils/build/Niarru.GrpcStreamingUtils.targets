@@ -1,0 +1,13 @@
+<Project>
+
+  <PropertyGroup>
+    <GrpcStreamingUtilsProtosPath>$(MSBuildThisFileDirectory)..\content\protos\</GrpcStreamingUtilsProtosPath>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'@(Protobuf)' != ''">
+    <Protobuf Update="@(Protobuf)">
+      <AdditionalImportDirs>%(AdditionalImportDirs);$(GrpcStreamingUtilsProtosPath)</AdditionalImportDirs>
+    </Protobuf>
+  </ItemGroup>
+
+</Project>
