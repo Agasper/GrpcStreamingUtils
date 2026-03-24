@@ -57,28 +57,34 @@ internal sealed class StreamKeepAliveManager : IDisposable
         {
             if (_disposed) return;
 
-            var timeSinceLastPing = now - _lastPingSentAt;
-            if (timeSinceLastPing.TotalSeconds >= _options.PingIntervalSeconds)
+            if (_options.PingIntervalSeconds > 0)
             {
-                shouldSendPing = true;
-                _lastPingSentAt = now;
+                var timeSinceLastPing = now - _lastPingSentAt;
+                if (timeSinceLastPing.TotalSeconds >= _options.PingIntervalSeconds)
+                {
+                    shouldSendPing = true;
+                    _lastPingSentAt = now;
+                }
             }
 
-            var idleTime = now - _lastMessageReceivedAt;
-            var timeout = TimeSpan.FromSeconds(_options.IdleTimeoutSeconds);
-
-            if (idleTime > timeout)
+            if (_options.IdleTimeoutSeconds > 0)
             {
-                using (_logger.BeginScope(new Dictionary<string, object> { ["ConnectionId"] = _connectionId.ToString() }))
-                {
-                    _logger.LogWarning(
-                        "Stream connection {connectionId} timed out: no messages received for {idleSeconds}s (timeout: {timeoutSeconds}s)",
-                        _connectionId,
-                        (int)idleTime.TotalSeconds,
-                        _options.IdleTimeoutSeconds);
-                }
+                var idleTime = now - _lastMessageReceivedAt;
+                var timeout = TimeSpan.FromSeconds(_options.IdleTimeoutSeconds);
 
-                shouldTimeout = true;
+                if (idleTime > timeout)
+                {
+                    using (_logger.BeginScope(new Dictionary<string, object> { ["ConnectionId"] = _connectionId.ToString() }))
+                    {
+                        _logger.LogWarning(
+                            "Stream connection {connectionId} timed out: no messages received for {idleSeconds}s (timeout: {timeoutSeconds}s)",
+                            _connectionId,
+                            (int)idleTime.TotalSeconds,
+                            _options.IdleTimeoutSeconds);
+                    }
+
+                    shouldTimeout = true;
+                }
             }
         }
 

@@ -326,8 +326,8 @@ Registers:
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
 | `DefaultCommandTimeoutSeconds` | 15 | — | Default timeout for RPC calls |
-| `IdleTimeoutSeconds` | 30 | — | Close connection if no messages received |
-| `PingIntervalSeconds` | 10 | — | Interval between keep-alive pings |
+| `IdleTimeoutSeconds` | 30 | — | Close connection if no messages received (0 = disabled) |
+| `PingIntervalSeconds` | 10 | — | Interval between keep-alive pings (0 = disabled) |
 | `InitialReconnectIntervalSeconds` | 1 | 1–300 | First reconnect delay |
 | `MaxReconnectIntervalSeconds` | 60 | 1–3600 | Max reconnect delay after backoff |
 | `ReconnectBackoffMultiplier` | 2 | 1–10 | Delay multiplier for each subsequent reconnect attempt |
