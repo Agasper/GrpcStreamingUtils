@@ -1,4 +1,3 @@
-using Niarru.GrpcStreamingUtils.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace Niarru.GrpcStreamingUtils.KeepAlive;
@@ -6,9 +5,10 @@ namespace Niarru.GrpcStreamingUtils.KeepAlive;
 internal sealed class StreamKeepAliveManager : IDisposable
 {
     private readonly Guid _connectionId;
-    private readonly Func<CancellationToken, Task> _sendPingFunc;
+    private readonly Func<CancellationToken, Task>? _sendPingFunc;
     private readonly Action _onTimeoutAction;
-    private readonly StreamingOptions _options;
+    private readonly TimeSpan? _pingInterval;
+    private readonly TimeSpan? _idleTimeout;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger _logger;
     private readonly object _lock = new();
@@ -19,16 +19,18 @@ internal sealed class StreamKeepAliveManager : IDisposable
 
     public StreamKeepAliveManager(
         Guid connectionId,
-        Func<CancellationToken, Task> sendPingFunc,
+        Func<CancellationToken, Task>? sendPingFunc,
         Action onTimeoutAction,
-        StreamingOptions options,
+        TimeSpan? pingInterval,
+        TimeSpan? idleTimeout,
         TimeProvider timeProvider,
         ILogger logger)
     {
         _connectionId = connectionId;
-        _sendPingFunc = sendPingFunc ?? throw new ArgumentNullException(nameof(sendPingFunc));
+        _sendPingFunc = sendPingFunc;
         _onTimeoutAction = onTimeoutAction ?? throw new ArgumentNullException(nameof(onTimeoutAction));
-        _options = options ?? throw new ArgumentNullException(nameof(options));
+        _pingInterval = pingInterval;
+        _idleTimeout = idleTimeout;
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
@@ -57,22 +59,21 @@ internal sealed class StreamKeepAliveManager : IDisposable
         {
             if (_disposed) return;
 
-            if (_options.PingIntervalSeconds > 0)
+            if (_pingInterval.HasValue && _sendPingFunc != null)
             {
                 var timeSinceLastPing = now - _lastPingSentAt;
-                if (timeSinceLastPing.TotalSeconds >= _options.PingIntervalSeconds)
+                if (timeSinceLastPing >= _pingInterval.Value)
                 {
                     shouldSendPing = true;
                     _lastPingSentAt = now;
                 }
             }
 
-            if (_options.IdleTimeoutSeconds > 0)
+            if (_idleTimeout.HasValue)
             {
                 var idleTime = now - _lastMessageReceivedAt;
-                var timeout = TimeSpan.FromSeconds(_options.IdleTimeoutSeconds);
 
-                if (idleTime > timeout)
+                if (idleTime > _idleTimeout.Value)
                 {
                     using (_logger.BeginScope(new Dictionary<string, object> { ["ConnectionId"] = _connectionId.ToString() }))
                     {
@@ -80,7 +81,7 @@ internal sealed class StreamKeepAliveManager : IDisposable
                             "Stream connection {connectionId} timed out: no messages received for {idleSeconds}s (timeout: {timeoutSeconds}s)",
                             _connectionId,
                             (int)idleTime.TotalSeconds,
-                            _options.IdleTimeoutSeconds);
+                            (int)_idleTimeout.Value.TotalSeconds);
                     }
 
                     shouldTimeout = true;
@@ -92,7 +93,7 @@ internal sealed class StreamKeepAliveManager : IDisposable
         {
             try
             {
-                await _sendPingFunc(cancellationToken).ConfigureAwait(false);
+                await _sendPingFunc!(cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex)
             {

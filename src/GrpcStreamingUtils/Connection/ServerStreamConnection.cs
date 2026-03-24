@@ -1,4 +1,3 @@
-using Niarru.GrpcStreamingUtils.Configuration;
 using Grpc.Core;
 using Microsoft.Extensions.Logging;
 
@@ -14,12 +13,13 @@ public abstract class ServerStreamConnection<TIncoming, TOutgoing> : StreamConne
     protected ServerStreamConnection(
         IAsyncStreamReader<TIncoming> requestStream,
         IServerStreamWriter<TOutgoing> responseStream,
-        StreamingOptions options,
         TimeProvider timeProvider,
         CancellationToken grpcCallCancellation,
-        ILogger logger)
-        : base(options, timeProvider,
-            CancellationTokenSource.CreateLinkedTokenSource(grpcCallCancellation), logger)
+        ILogger logger,
+        TimeSpan? pingInterval = null,
+        TimeSpan? idleTimeout = null)
+        : base(timeProvider,
+            CancellationTokenSource.CreateLinkedTokenSource(grpcCallCancellation), logger, pingInterval, idleTimeout)
     {
         _requestStream = requestStream ?? throw new ArgumentNullException(nameof(requestStream));
         _responseStream = responseStream ?? throw new ArgumentNullException(nameof(responseStream));

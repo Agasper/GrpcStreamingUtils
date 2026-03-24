@@ -1,7 +1,6 @@
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
 using GrpcStreamingUtils.Tests.Proto;
-using Niarru.GrpcStreamingUtils.Configuration;
 using Niarru.GrpcStreamingUtils.Rpc;
 
 namespace GrpcStreamingUtils.Tests.Rpc;
@@ -14,7 +13,7 @@ public interface ITestRpc
 
 public class StreamRpcProxyTests
 {
-    private readonly StreamingOptions _options = new() { DefaultCommandTimeoutSeconds = 5 };
+    private readonly TimeSpan _defaultTimeout = TimeSpan.FromSeconds(5);
 
     [Fact]
     public async Task Echo_Roundtrip_PacksAndUnpacks()
@@ -22,7 +21,7 @@ public class StreamRpcProxyTests
         RequestEnvelope? captured = null;
         var client = new StreamRpcClient(
             async (env, ct) => { captured = env; },
-            _options);
+            defaultTimeout: _defaultTimeout);
 
         var proxy = client.CreateProxy<ITestRpc>();
 
@@ -53,7 +52,7 @@ public class StreamRpcProxyTests
         RequestEnvelope? captured = null;
         var client = new StreamRpcClient(
             async (env, ct) => { captured = env; },
-            _options);
+            defaultTimeout: _defaultTimeout);
 
         var proxy = client.CreateProxy<ITestRpc>();
 
@@ -74,7 +73,7 @@ public class StreamRpcProxyTests
         RequestEnvelope? captured = null;
         var client = new StreamRpcClient(
             async (env, ct) => { captured = env; },
-            _options);
+            defaultTimeout: _defaultTimeout);
 
         var proxy = client.CreateProxy<ITestRpc>();
 
@@ -95,10 +94,9 @@ public class StreamRpcProxyTests
     [Fact]
     public async Task Echo_Timeout_ThrowsTimeoutException()
     {
-        var options = new StreamingOptions { DefaultCommandTimeoutSeconds = 1 };
         var client = new StreamRpcClient(
             async (env, ct) => { },
-            options);
+            defaultTimeout: TimeSpan.FromSeconds(1));
 
         var proxy = client.CreateProxy<ITestRpc>();
 

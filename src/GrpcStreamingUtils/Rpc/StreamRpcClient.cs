@@ -4,25 +4,26 @@ using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
 using Microsoft.Extensions.Logging;
-using Niarru.GrpcStreamingUtils.Configuration;
 
 namespace Niarru.GrpcStreamingUtils.Rpc;
 
 public sealed class StreamRpcClient : IDisposable
 {
+    public const int DefaultTimeoutSeconds = 60;
+
     private readonly ConcurrentDictionary<string, TaskCompletionSource<ResponseEnvelope>> _pending = new();
     private readonly Func<RequestEnvelope, CancellationToken, Task> _sendFunc;
-    private readonly StreamingOptions _options;
+    private readonly TimeSpan _defaultTimeout;
     private readonly ILogger? _logger;
     private bool _disposed;
 
     public StreamRpcClient(
         Func<RequestEnvelope, CancellationToken, Task> sendFunc,
-        StreamingOptions options,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        TimeSpan? defaultTimeout = null)
     {
         _sendFunc = sendFunc ?? throw new ArgumentNullException(nameof(sendFunc));
-        _options = options ?? throw new ArgumentNullException(nameof(options));
+        _defaultTimeout = defaultTimeout ?? TimeSpan.FromSeconds(DefaultTimeoutSeconds);
         _logger = logger;
     }
 
@@ -95,7 +96,7 @@ public sealed class StreamRpcClient : IDisposable
         {
             await _sendFunc(envelope, ct).ConfigureAwait(false);
 
-            var timeoutValue = timeout ?? TimeSpan.FromSeconds(_options.DefaultCommandTimeoutSeconds);
+            var timeoutValue = timeout ?? _defaultTimeout;
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(timeoutValue);
 

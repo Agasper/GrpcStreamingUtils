@@ -1,4 +1,3 @@
-using Niarru.GrpcStreamingUtils.Configuration;
 using Niarru.GrpcStreamingUtils.KeepAlive;
 using Grpc.Core;
 using Microsoft.Extensions.Logging;
@@ -32,10 +31,11 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
     public CancellationToken ConnectionClosed => _connectionCts.Token;
 
     protected StreamConnectionBase(
-        StreamingOptions options,
         TimeProvider timeProvider,
         CancellationTokenSource connectionCts,
-        ILogger logger)
+        ILogger logger,
+        TimeSpan? pingInterval = null,
+        TimeSpan? idleTimeout = null)
         : base(Guid.NewGuid())
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -43,9 +43,10 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
 
         KeepAliveManager = new StreamKeepAliveManager(
             ConnectionId,
-            async ct => await SendAsync(CreatePingMessage(), ct).ConfigureAwait(false),
+            pingInterval.HasValue ? async ct => await SendAsync(CreatePingMessage(), ct).ConfigureAwait(false) : null,
             () => _connectionCts.Cancel(),
-            options ?? throw new ArgumentNullException(nameof(options)),
+            pingInterval,
+            idleTimeout,
             timeProvider ?? throw new ArgumentNullException(nameof(timeProvider)),
             logger);
     }

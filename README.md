@@ -74,11 +74,10 @@ public class MyClientConnection : ClientStreamConnection<ServerMessage, ClientMe
 
     public MyClientConnection(
         AsyncDuplexStreamingCall<ClientMessage, ServerMessage> stream,
-        StreamingOptions options,
         TimeProvider timeProvider,
         ILogger logger,
         Action<ServerMessage> onMessage)
-        : base(stream, options, timeProvider, logger)
+        : base(stream, timeProvider, logger, pingInterval: TimeSpan.FromSeconds(10))
     {
         _onMessage = onMessage;
     }
@@ -107,7 +106,7 @@ Usage:
 
 ```csharp
 var stream = grpcClient.BiDirectionalStream(cancellationToken: ct);
-var connection = new MyClientConnection(stream, options, TimeProvider.System, logger,
+var connection = new MyClientConnection(stream, TimeProvider.System, logger,
     msg => Console.WriteLine($"Got: {msg}"));
 
 // Start reading (blocks until stream closes)
@@ -132,11 +131,11 @@ public class MyServerConnection : ServerStreamConnection<ClientMessage, ServerMe
     public MyServerConnection(
         IAsyncStreamReader<ClientMessage> requestStream,
         IServerStreamWriter<ServerMessage> responseStream,
-        StreamingOptions options,
         TimeProvider timeProvider,
         CancellationToken grpcCallCancellation,
         ILogger logger)
-        : base(requestStream, responseStream, options, timeProvider, grpcCallCancellation, logger)
+        : base(requestStream, responseStream, timeProvider, grpcCallCancellation, logger,
+            idleTimeout: TimeSpan.FromSeconds(30))
     { }
 
     protected override ServerMessage CreatePingMessage()
@@ -161,7 +160,7 @@ public override async Task BiDirectionalStream(
     ServerCallContext context)
 {
     var connection = new MyServerConnection(
-        requestStream, responseStream, _options,
+        requestStream, responseStream,
         TimeProvider.System, context.CancellationToken, _logger);
 
     _keepAliveMonitor.Register(connection);
@@ -244,10 +243,9 @@ public class NotificationStreamClient
         NotificationService.NotificationServiceClient grpcClient,
         string subscriberId,
         StreamKeepAliveMonitor keepAliveMonitor,
-        StreamingOptions options,
         TimeProvider timeProvider,
         ILogger<NotificationStreamClient> logger)
-        : base(keepAliveMonitor, options, timeProvider, logger)
+        : base(keepAliveMonitor, timeProvider, logger)
     {
         _grpcClient = grpcClient;
         _subscriberId = subscriberId;
@@ -264,7 +262,7 @@ public class NotificationStreamClient
     // How to create a connection from the stream
     protected override MyClientConnection CreateConnection(
         AsyncDuplexStreamingCall<ClientMessage, ServerMessage> stream)
-        => new MyClientConnection(stream, _streamingOptions, TimeProvider, Logger,
+        => new MyClientConnection(stream, TimeProvider, Logger,
             msg => HandleMessage(msg));
 
     // Optional: handshake on connect (before RunAsync)
@@ -286,51 +284,13 @@ Behavior on disconnect:
 1. Stream breaks → connection dispose → unregister from keep-alive
 2. Waits `InitialReconnectIntervalSeconds` (default 1s)
 3. Attempts to reconnect
-4. On repeated failure — multiplies delay by `ReconnectBackoffMultiplier` up to `MaxReconnectIntervalSeconds` (default 60s)
+4. On repeated failure — multiplies delay by backoff multiplier (default 2x) up to max interval (default 60s)
 5. On successful connection — resets backoff
 
 The client also provides:
 - `Connection` — current connection (or null)
 - `IsConnected` — whether there is an active connection
 - `SendAsync()` — sends through the current connection (throws `StreamNotEstablishedException` if not connected)
-
----
-
-## DI Registration and Configuration
-
-### AddStreaming
-
-```csharp
-builder.Services.AddStreaming(builder.Configuration);
-```
-
-Registers:
-- `StreamingOptions` from the `"Streaming"` configuration section with validation
-- `StreamKeepAliveMonitor` as singleton + hosted service
-
-### StreamingOptions
-
-```json
-{
-  "Streaming": {
-    "DefaultCommandTimeoutSeconds": 15,
-    "IdleTimeoutSeconds": 30,
-    "PingIntervalSeconds": 10,
-    "InitialReconnectIntervalSeconds": 1,
-    "MaxReconnectIntervalSeconds": 60,
-    "ReconnectBackoffMultiplier": 2
-  }
-}
-```
-
-| Parameter | Default | Range | Description |
-|-----------|---------|-------|-------------|
-| `DefaultCommandTimeoutSeconds` | 15 | — | Default timeout for RPC calls |
-| `IdleTimeoutSeconds` | 30 | — | Close connection if no messages received (0 = disabled) |
-| `PingIntervalSeconds` | 10 | — | Interval between keep-alive pings (0 = disabled) |
-| `InitialReconnectIntervalSeconds` | 1 | 1–300 | First reconnect delay |
-| `MaxReconnectIntervalSeconds` | 60 | 1–3600 | Max reconnect delay after backoff |
-| `ReconnectBackoffMultiplier` | 2 | 1–10 | Delay multiplier for each subsequent reconnect attempt |
 
 ---
 
@@ -420,15 +380,12 @@ message MyStreamMessage {
 ### Caller Side: StreamRpcClient + CreateProxy
 
 ```csharp
-var options = new StreamingOptions { DefaultCommandTimeoutSeconds = 10 };
-
-// Create an RPC client with a send function
+// Create an RPC client with a send function and default timeout
 var rpcClient = new StreamRpcClient(
     sendFunc: async (envelope, ct) =>
     {
         await connection.SendAsync(new MyStreamMessage { Request = envelope }, ct);
     },
-    options,
     logger);
 
 // Get a typed proxy
@@ -607,7 +564,6 @@ public class OrderStreamClient
     : ReconnectingStreamClient<MyClientConnection, ServerMessage, ClientMessage>
 {
     private readonly OrderService.OrderServiceClient _grpcClient;
-    private readonly StreamingOptions _options;
     private StreamRpcClient? _rpcClient;
 
     public IOrderService? Orders { get; private set; }
@@ -615,13 +571,11 @@ public class OrderStreamClient
     public OrderStreamClient(
         OrderService.OrderServiceClient grpcClient,
         StreamKeepAliveMonitor monitor,
-        StreamingOptions options,
         TimeProvider timeProvider,
         ILogger<OrderStreamClient> logger)
-        : base(monitor, options, timeProvider, logger)
+        : base(monitor, timeProvider, logger)
     {
         _grpcClient = grpcClient;
-        _options = options;
     }
 
     protected override string ClientName => "OrderStreamClient";
@@ -636,10 +590,10 @@ public class OrderStreamClient
         _rpcClient?.Dispose();
         _rpcClient = new StreamRpcClient(
             async (env, ct) => await SendAsync(new ClientMessage { Request = env }, ct),
-            _options, Logger);
+            defaultTimeout: TimeSpan.FromSeconds(10), Logger);
         Orders = _rpcClient.CreateProxy<IOrderService>();
 
-        return new MyClientConnection(stream, _options, TimeProvider, Logger,
+        return new MyClientConnection(stream, TimeProvider, Logger,
             msg =>
             {
                 if (msg.Response != null)
@@ -659,7 +613,8 @@ Usage:
 
 ```csharp
 // DI
-services.AddStreaming(configuration);
+services.AddSingleton<StreamKeepAliveMonitor>();
+services.AddHostedService(sp => sp.GetRequiredService<StreamKeepAliveMonitor>());
 services.AddSingleton<OrderStreamClient>();
 services.AddHostedService(sp => sp.GetRequiredService<OrderStreamClient>());
 

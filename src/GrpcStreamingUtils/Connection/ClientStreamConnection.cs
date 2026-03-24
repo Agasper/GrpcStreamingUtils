@@ -1,4 +1,3 @@
-using Niarru.GrpcStreamingUtils.Configuration;
 using Grpc.Core;
 using Microsoft.Extensions.Logging;
 
@@ -12,10 +11,11 @@ public abstract class ClientStreamConnection<TIncoming, TOutgoing> : StreamConne
 
     protected ClientStreamConnection(
         AsyncDuplexStreamingCall<TOutgoing, TIncoming> stream,
-        StreamingOptions options,
         TimeProvider timeProvider,
-        ILogger logger)
-        : base(options, timeProvider, new CancellationTokenSource(), logger)
+        ILogger logger,
+        TimeSpan? pingInterval = null,
+        TimeSpan? idleTimeout = null)
+        : base(timeProvider, new CancellationTokenSource(), logger, pingInterval, idleTimeout)
     {
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
     }

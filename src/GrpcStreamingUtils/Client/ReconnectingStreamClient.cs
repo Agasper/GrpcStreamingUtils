@@ -1,4 +1,3 @@
-using Niarru.GrpcStreamingUtils.Configuration;
 using Niarru.GrpcStreamingUtils.Connection;
 using Niarru.GrpcStreamingUtils.Exceptions;
 using Niarru.GrpcStreamingUtils.KeepAlive;
@@ -14,8 +13,10 @@ public abstract class ReconnectingStreamClient<TConnection, TIncoming, TOutgoing
     where TOutgoing : class
 {
     private readonly StreamKeepAliveMonitor _keepAliveMonitor;
-    private readonly StreamingOptions _streamingOptions;
-    private int _currentBackoffSeconds;
+    private readonly TimeSpan _initialReconnectInterval;
+    private readonly TimeSpan _maxReconnectInterval;
+    private readonly double _reconnectBackoffMultiplier;
+    private double _currentBackoffMs;
     private TConnection? _connection;
 
     protected TimeProvider TimeProvider { get; }
@@ -27,14 +28,18 @@ public abstract class ReconnectingStreamClient<TConnection, TIncoming, TOutgoing
 
     protected ReconnectingStreamClient(
         StreamKeepAliveMonitor keepAliveMonitor,
-        StreamingOptions streamingOptions,
         TimeProvider timeProvider,
-        ILogger logger)
+        ILogger logger,
+        TimeSpan? initialReconnectInterval = null,
+        TimeSpan? maxReconnectInterval = null,
+        double reconnectBackoffMultiplier = 2)
     {
         _keepAliveMonitor = keepAliveMonitor ?? throw new ArgumentNullException(nameof(keepAliveMonitor));
-        _streamingOptions = streamingOptions ?? throw new ArgumentNullException(nameof(streamingOptions));
         TimeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         Logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _initialReconnectInterval = initialReconnectInterval ?? TimeSpan.FromSeconds(1);
+        _maxReconnectInterval = maxReconnectInterval ?? TimeSpan.FromSeconds(60);
+        _reconnectBackoffMultiplier = reconnectBackoffMultiplier;
     }
 
     protected abstract string ClientName { get; }
@@ -66,7 +71,7 @@ public abstract class ReconnectingStreamClient<TConnection, TIncoming, TOutgoing
                     connection = CreateConnection(stream);
                     _connection = connection;
                     _keepAliveMonitor.Register(connection);
-                    _currentBackoffSeconds = 0;
+                    _currentBackoffMs = 0;
 
                     await connection.RunAsync(stoppingToken).ConfigureAwait(false);
                 }
@@ -117,22 +122,23 @@ public abstract class ReconnectingStreamClient<TConnection, TIncoming, TOutgoing
 
     private async Task ReconnectWithBackoffAsync(CancellationToken cancellationToken)
     {
-        if (_currentBackoffSeconds == 0)
+        if (_currentBackoffMs == 0)
         {
-            _currentBackoffSeconds = _streamingOptions.InitialReconnectIntervalSeconds;
+            _currentBackoffMs = _initialReconnectInterval.TotalMilliseconds;
         }
         else
         {
-            _currentBackoffSeconds = Math.Min(
-                (int)(_currentBackoffSeconds * _streamingOptions.ReconnectBackoffMultiplier),
-                _streamingOptions.MaxReconnectIntervalSeconds);
+            _currentBackoffMs = Math.Min(
+                _currentBackoffMs * _reconnectBackoffMultiplier,
+                _maxReconnectInterval.TotalMilliseconds);
         }
 
-        Logger.LogInformation("Reconnecting in {Delay}s...", _currentBackoffSeconds);
+        var delay = TimeSpan.FromMilliseconds(_currentBackoffMs);
+        Logger.LogInformation("Reconnecting in {Delay:F1}s...", delay.TotalSeconds);
 
         try
         {
-            await Task.Delay(TimeSpan.FromSeconds(_currentBackoffSeconds), cancellationToken).ConfigureAwait(false);
+            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {

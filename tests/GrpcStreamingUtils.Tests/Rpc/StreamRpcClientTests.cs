@@ -1,14 +1,13 @@
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
 using GrpcStreamingUtils.Tests.Proto;
-using Niarru.GrpcStreamingUtils.Configuration;
 using Niarru.GrpcStreamingUtils.Rpc;
 
 namespace GrpcStreamingUtils.Tests.Rpc;
 
 public class StreamRpcClientTests
 {
-    private readonly StreamingOptions _options = new() { DefaultCommandTimeoutSeconds = 5 };
+    private readonly TimeSpan _defaultTimeout = TimeSpan.FromSeconds(5);
 
     [Fact]
     public async Task CallAsync_SendsRequestEnvelope_WithCorrectTypeUrl()
@@ -16,7 +15,7 @@ public class StreamRpcClientTests
         RequestEnvelope? captured = null;
         var client = new StreamRpcClient(
             async (env, ct) => { captured = env; },
-            _options);
+            defaultTimeout: _defaultTimeout);
 
         var request = new TestRequest { Value = "hello" };
         var callTask = client.CallAsync(request, timeout: null, CancellationToken.None);
@@ -42,7 +41,7 @@ public class StreamRpcClientTests
         RequestEnvelope? captured = null;
         var client = new StreamRpcClient(
             async (env, ct) => { captured = env; },
-            _options);
+            defaultTimeout: _defaultTimeout);
 
         var callTask = client.CallAsync(new TestRequest { Value = "test" }, null, CancellationToken.None);
 
@@ -64,7 +63,7 @@ public class StreamRpcClientTests
         RequestEnvelope? captured = null;
         var client = new StreamRpcClient(
             async (env, ct) => { captured = env; },
-            _options);
+            defaultTimeout: _defaultTimeout);
 
         var callTask = client.CallAsync(new TestRequest { Value = "test" }, null, CancellationToken.None);
 
@@ -86,7 +85,7 @@ public class StreamRpcClientTests
     {
         var client = new StreamRpcClient(
             async (env, ct) => { },
-            _options);
+            defaultTimeout: _defaultTimeout);
 
         var result = client.TryComplete(new ResponseEnvelope
         {
@@ -102,7 +101,7 @@ public class StreamRpcClientTests
     {
         var client = new StreamRpcClient(
             async (env, ct) => { },
-            _options);
+            defaultTimeout: _defaultTimeout);
 
         var ex = await Assert.ThrowsAsync<TimeoutException>(() =>
             client.CallAsync(new TestRequest { Value = "test" },
@@ -117,7 +116,7 @@ public class StreamRpcClientTests
     {
         var client = new StreamRpcClient(
             async (env, ct) => { },
-            _options);
+            defaultTimeout: _defaultTimeout);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
 
@@ -130,7 +129,7 @@ public class StreamRpcClientTests
     {
         var client = new StreamRpcClient(
             async (env, ct) => { },
-            _options);
+            defaultTimeout: _defaultTimeout);
 
         var task1 = client.CallAsync(new TestRequest { Value = "1" }, TimeSpan.FromSeconds(30), CancellationToken.None);
         var task2 = client.CallAsync(new TestRequest { Value = "2" }, TimeSpan.FromSeconds(30), CancellationToken.None);
@@ -146,7 +145,7 @@ public class StreamRpcClientTests
     {
         var client = new StreamRpcClient(
             async (env, ct) => { },
-            _options);
+            defaultTimeout: _defaultTimeout);
 
         var task = client.CallAsync(new TestRequest { Value = "test" }, TimeSpan.FromSeconds(30), CancellationToken.None);
 
@@ -160,7 +159,7 @@ public class StreamRpcClientTests
     {
         var client = new StreamRpcClient(
             async (env, ct) => { },
-            _options);
+            defaultTimeout: _defaultTimeout);
 
         client.Dispose();
 
