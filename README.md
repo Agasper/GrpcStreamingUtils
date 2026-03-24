@@ -1,5 +1,8 @@
 # Niarru.GrpcStreamingUtils
 
+[![NuGet](https://img.shields.io/nuget/v/Niarru.GrpcStreamingUtils.svg)](https://www.nuget.org/packages/Niarru.GrpcStreamingUtils)
+[![NuGet Downloads](https://img.shields.io/nuget/dt/Niarru.GrpcStreamingUtils.svg)](https://www.nuget.org/packages/Niarru.GrpcStreamingUtils)
+
 A .NET 8 library that simplifies working with gRPC bidirectional streams. Handles connection lifecycle, write serialization, keep-alive, automatic reconnection with backoff, and — on top of all that — a typed RPC-over-stream framework.
 
 ## What Problem Does It Solve
