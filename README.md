@@ -144,7 +144,6 @@ public class MyServerConnection : ServerStreamConnection<ClientMessage, ServerMe
 
     protected override async Task OnMessageReceivedAsync(ClientMessage message, CancellationToken ct)
     {
-        // Обработка входящих сообщений от клиента
         if (message.Text != null)
         {
             await SendAsync(new ServerMessage { Text = $"Echo: {message.Text}" }, ct);
@@ -235,36 +234,37 @@ _keepAliveMonitor.Unregister(connection); // прекратить монитор
 `BackgroundService` с экспоненциальным backoff. Переопределите 3-4 метода, и получите устойчивый к обрывам клиент:
 
 ```csharp
-public class ChatStreamClient : ReconnectingStreamClient<MyChatConnection, ServerMessage, ClientMessage>
+public class NotificationStreamClient
+    : ReconnectingStreamClient<MyClientConnection, ServerMessage, ClientMessage>
 {
-    private readonly ChatService.ChatServiceClient _grpcClient;
-    private readonly string _userId;
+    private readonly NotificationService.NotificationServiceClient _grpcClient;
+    private readonly string _subscriberId;
 
-    public ChatStreamClient(
-        ChatService.ChatServiceClient grpcClient,
-        string userId,
+    public NotificationStreamClient(
+        NotificationService.NotificationServiceClient grpcClient,
+        string subscriberId,
         StreamKeepAliveMonitor keepAliveMonitor,
         StreamingOptions options,
         TimeProvider timeProvider,
-        ILogger<ChatStreamClient> logger)
+        ILogger<NotificationStreamClient> logger)
         : base(keepAliveMonitor, options, timeProvider, logger)
     {
         _grpcClient = grpcClient;
-        _userId = userId;
+        _subscriberId = subscriberId;
     }
 
     // Имя клиента для логов
-    protected override string ClientName => "ChatStreamClient";
+    protected override string ClientName => "NotificationStreamClient";
 
     // Как создать gRPC stream
     protected override AsyncDuplexStreamingCall<ClientMessage, ServerMessage> CreateStream(
         CancellationToken ct)
-        => _grpcClient.ChatStream(cancellationToken: ct);
+        => _grpcClient.Subscribe(cancellationToken: ct);
 
     // Как создать connection из stream
-    protected override MyChatConnection CreateConnection(
+    protected override MyClientConnection CreateConnection(
         AsyncDuplexStreamingCall<ClientMessage, ServerMessage> stream)
-        => new MyChatConnection(stream, _streamingOptions, TimeProvider, Logger,
+        => new MyClientConnection(stream, _streamingOptions, TimeProvider, Logger,
             msg => HandleMessage(msg));
 
     // Опционально: handshake при подключении (до RunAsync)
@@ -273,12 +273,12 @@ public class ChatStreamClient : ReconnectingStreamClient<MyChatConnection, Serve
         CancellationToken ct)
     {
         await stream.RequestStream.WriteAsync(
-            new ClientMessage { Auth = new Auth { UserId = _userId } }, ct);
+            new ClientMessage { Auth = new Auth { SubscriberId = _subscriberId } }, ct);
     }
 
     // Опционально: logging scope для всех логов клиента
     protected override IDisposable? CreateLoggingScope()
-        => Logger.BeginScope(new Dictionary<string, object> { ["UserId"] = _userId });
+        => Logger.BeginScope(new Dictionary<string, object> { ["SubscriberId"] = _subscriberId });
 }
 ```
 
@@ -353,17 +353,17 @@ Bidirectional stream — это поток сообщений без семан�
 Интерфейс, который знают обе стороны:
 
 ```csharp
-public interface IBattleServerRpc
+public interface IOrderService
 {
     // Request/Response — возвращает Task<IMessage>
-    Task<RoomCreated> CreateRoom(CreateRoom request, CancellationToken ct = default);
-    Task<RoomInfo> GetRoom(GetRoomRequest request, CancellationToken ct = default);
+    Task<PlaceOrderResponse> PlaceOrder(PlaceOrderRequest request, CancellationToken ct = default);
+    Task<OrderInfo> GetOrder(GetOrderRequest request, CancellationToken ct = default);
 
     // Fire-and-forget — возвращает Task, сервер отправит подтверждение (status OK)
-    Task DeleteRoom(DeleteRoom request, CancellationToken ct = default);
+    Task CancelOrder(CancelOrderRequest request, CancellationToken ct = default);
 
     // CancellationToken опционален
-    Task<PingResult> Ping(PingRequest request);
+    Task<HealthCheckResponse> HealthCheck(HealthCheckRequest request);
 }
 ```
 
@@ -430,11 +430,13 @@ var rpcClient = new StreamRpcClient(
     logger);
 
 // Получаем типизированный прокси
-var rpc = rpcClient.CreateProxy<IBattleServerRpc>();
+var orders = rpcClient.CreateProxy<IOrderService>();
 
 // Вызываем как обычные async-методы
-var room = await rpc.CreateRoom(new CreateRoom { Name = "Arena" }, ct);
-await rpc.DeleteRoom(new DeleteRoom { RoomId = room.RoomId }, ct);
+var result = await orders.PlaceOrder(new PlaceOrderRequest { ItemId = "sku-42", Quantity = 2 }, ct);
+Console.WriteLine($"Order placed: {result.OrderId}");
+
+await orders.CancelOrder(new CancelOrderRequest { OrderId = result.OrderId }, ct);
 ```
 
 В цикле получения сообщений передавайте ответы обратно в клиент:
@@ -458,38 +460,41 @@ if (msg.Response != null)
 Реализуйте интерфейс:
 
 ```csharp
-public class BattleServerRpcHandler : IBattleServerRpc
+public class OrderServiceHandler : IOrderService
 {
-    private readonly RoomService _rooms;
+    private readonly IOrderRepository _orders;
 
-    public async Task<RoomCreated> CreateRoom(CreateRoom request, CancellationToken ct)
+    public async Task<PlaceOrderResponse> PlaceOrder(PlaceOrderRequest request, CancellationToken ct)
     {
-        if (string.IsNullOrEmpty(request.Name))
-            throw new StreamRpcException(StatusCode.InvalidArgument, "Room name is required");
+        if (string.IsNullOrEmpty(request.ItemId))
+            throw new StreamRpcException(StatusCode.InvalidArgument, "ItemId is required");
 
-        if (!await _rooms.HasCapacityAsync(ct))
-            throw new StreamRpcException(StatusCode.ResourceExhausted, "No capacity");
+        if (!await _orders.IsAvailableAsync(request.ItemId, ct))
+            throw new StreamRpcException(StatusCode.FailedPrecondition, "Item is out of stock");
 
-        var room = await _rooms.CreateAsync(request.Name, ct);
-        return new RoomCreated { RoomId = room.Id };
+        var order = await _orders.CreateAsync(request.ItemId, request.Quantity, ct);
+        return new PlaceOrderResponse { OrderId = order.Id };
     }
 
-    public async Task<RoomInfo> GetRoom(GetRoomRequest request, CancellationToken ct)
+    public async Task<OrderInfo> GetOrder(GetOrderRequest request, CancellationToken ct)
     {
-        var room = await _rooms.FindAsync(request.RoomId, ct)
-            ?? throw new StreamRpcException(StatusCode.NotFound, "Room not found");
-        return new RoomInfo { Name = room.Name };
+        var order = await _orders.FindAsync(request.OrderId, ct)
+            ?? throw new StreamRpcException(StatusCode.NotFound, "Order not found");
+        return new OrderInfo { OrderId = order.Id, Status = order.Status };
     }
 
-    public async Task DeleteRoom(DeleteRoom request, CancellationToken ct)
+    public async Task CancelOrder(CancelOrderRequest request, CancellationToken ct)
     {
-        await _rooms.DeleteAsync(request.RoomId, ct);
+        await _orders.CancelAsync(request.OrderId, ct);
         // Для void-методов достаточно вернуть Task — клиент получит status OK
     }
 
-    public Task<PingResult> Ping(PingRequest request)
+    public Task<HealthCheckResponse> HealthCheck(HealthCheckRequest request)
     {
-        return Task.FromResult(new PingResult { Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
+        return Task.FromResult(new HealthCheckResponse
+        {
+            Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        });
     }
 }
 ```
@@ -497,8 +502,8 @@ public class BattleServerRpcHandler : IBattleServerRpc
 Создайте диспетчер и маршрутизируйте входящие запросы:
 
 ```csharp
-var dispatcher = StreamRpcDispatcher.Create<IBattleServerRpc>(
-    handler: new BattleServerRpcHandler(),
+var dispatcher = StreamRpcDispatcher.Create<IOrderService>(
+    handler: new OrderServiceHandler(),
     sendFunc: async (envelope, ct) =>
     {
         await connection.SendAsync(new MyStreamMessage { Response = envelope }, ct);
@@ -549,19 +554,19 @@ if (msg.Request != null)
 ```csharp
 try
 {
-    var result = await rpc.CreateRoom(new CreateRoom { Name = "Arena" }, ct);
+    var result = await orders.PlaceOrder(new PlaceOrderRequest { ItemId = "sku-42" }, ct);
 }
-catch (StreamRpcException ex) when (ex.StatusCode == StatusCode.ResourceExhausted)
+catch (StreamRpcException ex) when (ex.StatusCode == StatusCode.FailedPrecondition)
 {
-    logger.LogWarning("Сервер перегружен: {Error}", ex.Message);
+    logger.LogWarning("Cannot place order: {Error}", ex.Message);
 }
 catch (StreamRpcException ex)
 {
-    logger.LogError("RPC ошибка {StatusCode}: {Error}", ex.StatusCode, ex.Message);
+    logger.LogError("RPC failed with {StatusCode}: {Error}", ex.StatusCode, ex.Message);
 }
 catch (TimeoutException)
 {
-    logger.LogError("RPC вызов не дождался ответа");
+    logger.LogError("RPC call timed out");
 }
 ```
 
@@ -586,7 +591,7 @@ if (msg.Response != null)
     rpcClient.TryComplete(msg.Response);               // ответ клиента на наш запрос
 
 // Вызов клиента с сервера:
-await clientProxy.SyncWorldState(new WorldState { ... }, ct);
+await clientProxy.PushNotification(new Notification { Text = "Your order shipped" }, ct);
 ```
 
 ---
@@ -596,42 +601,43 @@ await clientProxy.SyncWorldState(new WorldState { ... }, ct);
 Клиент, который автоматически переподключается и предоставляет typed RPC:
 
 ```csharp
-public class BattleStreamClient : ReconnectingStreamClient<BattleClientConnection, ServerMessage, ClientMessage>
+public class OrderStreamClient
+    : ReconnectingStreamClient<MyClientConnection, ServerMessage, ClientMessage>
 {
-    private readonly BattleService.BattleServiceClient _grpcClient;
+    private readonly OrderService.OrderServiceClient _grpcClient;
     private readonly StreamingOptions _options;
     private StreamRpcClient? _rpcClient;
 
-    public IBattleServerRpc? Rpc { get; private set; }
+    public IOrderService? Orders { get; private set; }
 
-    public BattleStreamClient(
-        BattleService.BattleServiceClient grpcClient,
+    public OrderStreamClient(
+        OrderService.OrderServiceClient grpcClient,
         StreamKeepAliveMonitor monitor,
         StreamingOptions options,
         TimeProvider timeProvider,
-        ILogger<BattleStreamClient> logger)
+        ILogger<OrderStreamClient> logger)
         : base(monitor, options, timeProvider, logger)
     {
         _grpcClient = grpcClient;
         _options = options;
     }
 
-    protected override string ClientName => "BattleStreamClient";
+    protected override string ClientName => "OrderStreamClient";
 
     protected override AsyncDuplexStreamingCall<ClientMessage, ServerMessage> CreateStream(
         CancellationToken ct)
-        => _grpcClient.GameStream(cancellationToken: ct);
+        => _grpcClient.OrderStream(cancellationToken: ct);
 
-    protected override BattleClientConnection CreateConnection(
+    protected override MyClientConnection CreateConnection(
         AsyncDuplexStreamingCall<ClientMessage, ServerMessage> stream)
     {
         _rpcClient?.Dispose();
         _rpcClient = new StreamRpcClient(
             async (env, ct) => await SendAsync(new ClientMessage { Request = env }, ct),
             _options, Logger);
-        Rpc = _rpcClient.CreateProxy<IBattleServerRpc>();
+        Orders = _rpcClient.CreateProxy<IOrderService>();
 
-        return new BattleClientConnection(stream, _options, TimeProvider, Logger,
+        return new MyClientConnection(stream, _options, TimeProvider, Logger,
             msg =>
             {
                 if (msg.Response != null)
@@ -652,11 +658,12 @@ public class BattleStreamClient : ReconnectingStreamClient<BattleClientConnectio
 ```csharp
 // DI
 services.AddStreaming(configuration);
-services.AddSingleton<BattleStreamClient>();
-services.AddHostedService(sp => sp.GetRequiredService<BattleStreamClient>());
+services.AddSingleton<OrderStreamClient>();
+services.AddHostedService(sp => sp.GetRequiredService<OrderStreamClient>());
 
 // В коде
-var room = await battleClient.Rpc!.CreateRoom(new CreateRoom { Name = "Arena" }, ct);
+var result = await orderClient.Orders!.PlaceOrder(
+    new PlaceOrderRequest { ItemId = "sku-42", Quantity = 1 }, ct);
 ```
 
 ---
