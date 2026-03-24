@@ -1,27 +1,27 @@
 # Niarru.GrpcStreamingUtils
 
-Библиотека для .NET 8, упрощающая работу с gRPC bidirectional streams. Берёт на себя рутину: управление жизненным циклом соединения, сериализация записей, keep-alive, автоматический реконнект с backoff, и — поверх всего этого — типизированный RPC-over-stream фреймворк.
+A .NET 8 library that simplifies working with gRPC bidirectional streams. Handles connection lifecycle, write serialization, keep-alive, automatic reconnection with backoff, and — on top of all that — a typed RPC-over-stream framework.
 
-## Какую проблему решает
+## What Problem Does It Solve
 
-gRPC bidirectional streaming — мощный инструмент, но работать с ним напрямую неудобно:
+gRPC bidirectional streaming is powerful, but working with it directly is tedious:
 
-- **Конкурентная запись** — `IServerStreamWriter` и `IClientStreamWriter` не потокобезопасны. Два одновременных `WriteAsync` — и stream сломан. Приходится вручную оборачивать каждую запись в `SemaphoreSlim`.
-- **Keep-alive** — gRPC HTTP/2 ping'и работают на транспортном уровне, но не спасают от «зависших» соединений на уровне приложения. Нужно слать свои ping-сообщения и отслеживать idle timeout.
-- **Переподключение** — при обрыве stream на клиенте нужно переподключаться, причём с exponential backoff, чтобы не заDDoSить сервер.
-- **Жизненный цикл** — нужно аккуратно обрабатывать закрытие stream: cancellation, gRPC errors, нормальное завершение, dispose. Легко потерять ресурсы или получить мёртвый stream без уведомления.
-- **RPC поверх stream** — если хочется request/response семантику поверх bidirectional stream (а не отдельные unary gRPC вызовы), приходится вручную писать корреляцию запрос/ответ, диспетчеризацию, обработку ошибок и таймаутов.
+- **Concurrent writes** — `IServerStreamWriter` and `IClientStreamWriter` are not thread-safe. Two simultaneous `WriteAsync` calls will corrupt the stream. You have to manually wrap every write in a `SemaphoreSlim`.
+- **Keep-alive** — gRPC HTTP/2 pings work at the transport level but won't detect "stuck" connections at the application level. You need to send your own ping messages and track idle timeouts.
+- **Reconnection** — when a client-side stream breaks, you need to reconnect with exponential backoff to avoid overwhelming the server.
+- **Lifecycle** — properly handling stream closure (cancellation, gRPC errors, normal completion, dispose) is error-prone. It's easy to leak resources or end up with a dead stream and no notification.
+- **RPC over stream** — if you want request/response semantics over a bidirectional stream (instead of separate unary gRPC calls), you have to manually implement request/response correlation, dispatching, error handling, and timeouts.
 
-Эта библиотека решает всё вышеперечисленное в двух слоях:
+This library addresses all of the above in two layers:
 
-1. **Connection layer** — потокобезопасные обёртки над gRPC stream, keep-alive мониторинг, автоматический реконнект
-2. **RPC layer** — типизированный request/response поверх stream через интерфейсы и `DispatchProxy`
+1. **Connection layer** — thread-safe wrappers over gRPC streams, keep-alive monitoring, automatic reconnection
+2. **RPC layer** — typed request/response over stream via interfaces and `DispatchProxy`
 
-Слои независимы: можно использовать только connections без RPC.
+The layers are independent: you can use connections without RPC.
 
 ---
 
-## Установка
+## Installation
 
 ```bash
 dotnet add package Niarru.GrpcStreamingUtils
@@ -29,28 +29,28 @@ dotnet add package Niarru.GrpcStreamingUtils
 
 ---
 
-## Слой 1: Connection Management
+## Layer 1: Connection Management
 
-### Проблема
+### The Problem
 
-Типичный код работы с gRPC duplex stream:
+Typical code for working with a gRPC duplex stream:
 
 ```csharp
-// Небезопасно: два одновременных WriteAsync сломают stream
+// Unsafe: two concurrent WriteAsync calls will corrupt the stream
 var stream = client.BiDirectionalStream();
-await stream.RequestStream.WriteAsync(msg1); // из потока A
-await stream.RequestStream.WriteAsync(msg2); // из потока B — гонка!
+await stream.RequestStream.WriteAsync(msg1); // from thread A
+await stream.RequestStream.WriteAsync(msg2); // from thread B — race condition!
 ```
 
-### Решение: StreamConnectionBase
+### Solution: StreamConnectionBase
 
-`StreamConnectionBase<TIncoming, TOutgoing>` — абстрактная обёртка, реализующая `IStreamConnection`:
+`StreamConnectionBase<TIncoming, TOutgoing>` — an abstract wrapper implementing `IStreamConnection`:
 
-- **Потокобезопасная запись** — все `SendAsync` сериализуются через `SemaphoreSlim`
-- **Цикл чтения** — `RunAsync` читает stream до завершения, вызывая `OnMessageReceivedAsync` на каждое сообщение
-- **Lifecycle events** — `OnConnectionClosed(CloseReason)` при нормальном закрытии, таймауте или ошибке
-- **Интеграция с keep-alive** — автоматически обновляет время последнего сообщения
-- **Корректный dispose** — cancel, очистка ресурсов, ожидание завершения записей
+- **Thread-safe writes** — all `SendAsync` calls are serialized via `SemaphoreSlim`
+- **Read loop** — `RunAsync` reads the stream until completion, calling `OnMessageReceivedAsync` for each message
+- **Lifecycle events** — `OnConnectionClosed(CloseReason)` on normal close, timeout, or error
+- **Keep-alive integration** — automatically updates last message time
+- **Proper dispose** — cancel, resource cleanup, waiting for pending writes
 
 ```csharp
 public interface IStreamConnection<TIncoming, TOutgoing> : IAsyncDisposable
@@ -63,9 +63,9 @@ public interface IStreamConnection<TIncoming, TOutgoing> : IAsyncDisposable
 }
 ```
 
-### ClientStreamConnection — клиентская сторона
+### ClientStreamConnection — Client Side
 
-Оборачивает `AsyncDuplexStreamingCall<TOutgoing, TIncoming>`:
+Wraps `AsyncDuplexStreamingCall<TOutgoing, TIncoming>`:
 
 ```csharp
 public class MyClientConnection : ClientStreamConnection<ServerMessage, ClientMessage>
@@ -83,18 +83,18 @@ public class MyClientConnection : ClientStreamConnection<ServerMessage, ClientMe
         _onMessage = onMessage;
     }
 
-    // Какое сообщение отправлять как ping
+    // Which message to send as a ping
     protected override ClientMessage CreatePingMessage()
         => new ClientMessage { Ping = new Ping() };
 
-    // Вызывается на каждое входящее сообщение
+    // Called for every incoming message
     protected override Task OnMessageReceivedAsync(ServerMessage message, CancellationToken ct)
     {
         _onMessage(message);
         return Task.CompletedTask;
     }
 
-    // Опционально: реакция на закрытие
+    // Optional: react to connection close
     protected override void OnConnectionClosed(StreamConnectionClosedArgs args)
     {
         if (args.Reason == CloseReason.Error)
@@ -103,28 +103,28 @@ public class MyClientConnection : ClientStreamConnection<ServerMessage, ClientMe
 }
 ```
 
-Использование:
+Usage:
 
 ```csharp
 var stream = grpcClient.BiDirectionalStream(cancellationToken: ct);
 var connection = new MyClientConnection(stream, options, TimeProvider.System, logger,
     msg => Console.WriteLine($"Got: {msg}"));
 
-// Запуск чтения (блокирует до закрытия stream)
+// Start reading (blocks until stream closes)
 _ = connection.RunAsync(ct);
 
-// Потокобезопасная отправка из любого потока
+// Thread-safe sending from any thread
 await connection.SendAsync(new ClientMessage { Text = "hello" }, ct);
 await connection.SendAsync(new ClientMessage { Text = "world" }, ct);
 
-// Закрытие
+// Close
 await connection.CloseAsync(ct);
 await connection.DisposeAsync();
 ```
 
-### ServerStreamConnection — серверная сторона
+### ServerStreamConnection — Server Side
 
-Оборачивает `IAsyncStreamReader` + `IServerStreamWriter` внутри gRPC метода:
+Wraps `IAsyncStreamReader` + `IServerStreamWriter` inside a gRPC method:
 
 ```csharp
 public class MyServerConnection : ServerStreamConnection<ClientMessage, ServerMessage>
@@ -152,7 +152,7 @@ public class MyServerConnection : ServerStreamConnection<ClientMessage, ServerMe
 }
 ```
 
-Использование в gRPC сервисе:
+Usage in a gRPC service:
 
 ```csharp
 public override async Task BiDirectionalStream(
@@ -179,59 +179,59 @@ public override async Task BiDirectionalStream(
 
 ### CloseReason
 
-Причина закрытия соединения, приходит в `OnConnectionClosed`:
+Close reason, passed to `OnConnectionClosed`:
 
-| Значение | Когда |
-|----------|-------|
-| `Normal` | Stream завершился штатно, cancellation, или gRPC Cancelled |
-| `Timeout` | Не используется напрямую (таймаут обрабатывается keep-alive через cancel) |
-| `Error` | Необработанное исключение при чтении stream |
+| Value | When |
+|-------|------|
+| `Normal` | Stream completed normally, cancellation, or gRPC Cancelled |
+| `Timeout` | Not used directly (timeout is handled by keep-alive via cancel) |
+| `Error` | Unhandled exception while reading the stream |
 
 ---
 
 ## Keep-Alive
 
-### Проблема
+### The Problem
 
-gRPC HTTP/2 keep-alive работает на уровне TCP-соединения, но не знает о состоянии вашего прикладного протокола. Клиент может «зависнуть» — не слать данные, но TCP-соединение формально живо. Или сервер может не заметить, что клиент давно отключился.
+gRPC HTTP/2 keep-alive works at the TCP connection level but knows nothing about your application protocol. A client can "hang" — stop sending data while the TCP connection remains technically alive. Or the server may not notice that a client disconnected long ago.
 
-### Решение: StreamKeepAliveMonitor + StreamKeepAliveManager
+### Solution: StreamKeepAliveMonitor + StreamKeepAliveManager
 
-Каждый `StreamConnectionBase` автоматически создаёт `StreamKeepAliveManager`, который:
+Each `StreamConnectionBase` automatically creates a `StreamKeepAliveManager` that:
 
-- Отслеживает время последнего полученного сообщения
-- По расписанию отправляет ping-сообщения (через `CreatePingMessage()`)
-- При превышении `IdleTimeoutSeconds` без сообщений — закрывает соединение
+- Tracks the time of the last received message
+- Periodically sends ping messages (via `CreatePingMessage()`)
+- Closes the connection when `IdleTimeoutSeconds` elapses without messages
 
-`StreamKeepAliveMonitor` — `BackgroundService`, который каждую секунду обходит все зарегистрированные соединения и вызывает их keep-alive логику.
+`StreamKeepAliveMonitor` — a `BackgroundService` that checks all registered connections every second and runs their keep-alive logic.
 
 ```csharp
-// Регистрация в DI (или вручную):
+// DI registration (or manually):
 services.AddSingleton<StreamKeepAliveMonitor>();
 services.AddHostedService(sp => sp.GetRequiredService<StreamKeepAliveMonitor>());
 
-// Регистрация соединения:
-_keepAliveMonitor.Register(connection);   // начать мониторинг
-_keepAliveMonitor.Unregister(connection); // прекратить мониторинг
+// Register a connection:
+_keepAliveMonitor.Register(connection);   // start monitoring
+_keepAliveMonitor.Unregister(connection); // stop monitoring
 ```
 
-Закрытые соединения автоматически удаляются из мониторинга.
+Closed connections are automatically removed from monitoring.
 
 ---
 
-## Автоматический реконнект
+## Automatic Reconnection
 
-### Проблема
+### The Problem
 
-При обрыве gRPC stream на клиенте нужно:
-- Переподключиться
-- Не заDDoSить сервер при массовом отключении
-- Отправить handshake (авторизация, идентификация)
-- Пересоздать connection и зарегистрировать его в keep-alive
+When a gRPC stream breaks on the client side, you need to:
+- Reconnect
+- Avoid overwhelming the server during mass disconnects
+- Send a handshake (auth, identification)
+- Recreate the connection and register it with keep-alive
 
-### Решение: ReconnectingStreamClient
+### Solution: ReconnectingStreamClient
 
-`BackgroundService` с экспоненциальным backoff. Переопределите 3-4 метода, и получите устойчивый к обрывам клиент:
+A `BackgroundService` with exponential backoff. Override 3-4 methods and get a resilient client:
 
 ```csharp
 public class NotificationStreamClient
@@ -253,21 +253,21 @@ public class NotificationStreamClient
         _subscriberId = subscriberId;
     }
 
-    // Имя клиента для логов
+    // Client name for logs
     protected override string ClientName => "NotificationStreamClient";
 
-    // Как создать gRPC stream
+    // How to create the gRPC stream
     protected override AsyncDuplexStreamingCall<ClientMessage, ServerMessage> CreateStream(
         CancellationToken ct)
         => _grpcClient.Subscribe(cancellationToken: ct);
 
-    // Как создать connection из stream
+    // How to create a connection from the stream
     protected override MyClientConnection CreateConnection(
         AsyncDuplexStreamingCall<ClientMessage, ServerMessage> stream)
         => new MyClientConnection(stream, _streamingOptions, TimeProvider, Logger,
             msg => HandleMessage(msg));
 
-    // Опционально: handshake при подключении (до RunAsync)
+    // Optional: handshake on connect (before RunAsync)
     protected override async Task SendHandshakeAsync(
         AsyncDuplexStreamingCall<ClientMessage, ServerMessage> stream,
         CancellationToken ct)
@@ -276,27 +276,27 @@ public class NotificationStreamClient
             new ClientMessage { Auth = new Auth { SubscriberId = _subscriberId } }, ct);
     }
 
-    // Опционально: logging scope для всех логов клиента
+    // Optional: logging scope for all client logs
     protected override IDisposable? CreateLoggingScope()
         => Logger.BeginScope(new Dictionary<string, object> { ["SubscriberId"] = _subscriberId });
 }
 ```
 
-Поведение при обрыве:
-1. Stream обрывается → connection dispose → unregister из keep-alive
-2. Ждёт `InitialReconnectIntervalSeconds` (по умолчанию 1с)
-3. Пробует переподключиться
-4. При повторном обрыве — удваивает задержку до `MaxReconnectIntervalSeconds` (по умолчанию 60с)
-5. При успешном подключении — сбрасывает backoff
+Behavior on disconnect:
+1. Stream breaks → connection dispose → unregister from keep-alive
+2. Waits `InitialReconnectIntervalSeconds` (default 1s)
+3. Attempts to reconnect
+4. On repeated failure — multiplies delay by `ReconnectBackoffMultiplier` up to `MaxReconnectIntervalSeconds` (default 60s)
+5. On successful connection — resets backoff
 
-Клиент также предоставляет:
-- `Connection` — текущий connection (или null)
-- `IsConnected` — есть ли активное соединение
-- `SendAsync()` — отправка через текущий connection (бросает `StreamNotEstablishedException` если не подключён)
+The client also provides:
+- `Connection` — current connection (or null)
+- `IsConnected` — whether there is an active connection
+- `SendAsync()` — sends through the current connection (throws `StreamNotEstablishedException` if not connected)
 
 ---
 
-## DI-регистрация и конфигурация
+## DI Registration and Configuration
 
 ### AddStreaming
 
@@ -304,9 +304,9 @@ public class NotificationStreamClient
 builder.Services.AddStreaming(builder.Configuration);
 ```
 
-Регистрирует:
-- `StreamingOptions` из секции `"Streaming"` в конфигурации с валидацией
-- `StreamKeepAliveMonitor` как singleton + hosted service
+Registers:
+- `StreamingOptions` from the `"Streaming"` configuration section with validation
+- `StreamKeepAliveMonitor` as singleton + hosted service
 
 ### StreamingOptions
 
@@ -323,61 +323,61 @@ builder.Services.AddStreaming(builder.Configuration);
 }
 ```
 
-| Параметр | По умолчанию | Диапазон | Описание |
-|----------|-------------|----------|----------|
-| `DefaultCommandTimeoutSeconds` | 15 | — | Таймаут RPC-вызовов по умолчанию |
-| `IdleTimeoutSeconds` | 30 | — | Закрыть соединение, если нет сообщений |
-| `PingIntervalSeconds` | 10 | — | Интервал отправки ping |
-| `InitialReconnectIntervalSeconds` | 1 | 1–300 | Первая задержка перед реконнектом |
-| `MaxReconnectIntervalSeconds` | 60 | 1–3600 | Максимальная задержка после backoff |
-| `ReconnectBackoffMultiplier` | 2 | 1–10 | Множитель задержки при каждом следующем реконнекте |
+| Parameter | Default | Range | Description |
+|-----------|---------|-------|-------------|
+| `DefaultCommandTimeoutSeconds` | 15 | — | Default timeout for RPC calls |
+| `IdleTimeoutSeconds` | 30 | — | Close connection if no messages received |
+| `PingIntervalSeconds` | 10 | — | Interval between keep-alive pings |
+| `InitialReconnectIntervalSeconds` | 1 | 1–300 | First reconnect delay |
+| `MaxReconnectIntervalSeconds` | 60 | 1–3600 | Max reconnect delay after backoff |
+| `ReconnectBackoffMultiplier` | 2 | 1–10 | Delay multiplier for each subsequent reconnect attempt |
 
 ---
 
-## Слой 2: RPC-over-Stream
+## Layer 2: RPC-over-Stream
 
-### Проблема
+### The Problem
 
-Bidirectional stream — это поток сообщений без семантики request/response. Если нужен аналог unary RPC, но через stream (чтобы не открывать новые HTTP/2 stream на каждый вызов), приходится вручную:
+A bidirectional stream is a message flow with no request/response semantics. If you need a unary RPC analogue over a stream (to avoid opening a new HTTP/2 stream per call), you have to manually:
 
-- Присваивать каждому запросу ID
-- На ответе возвращать этот ID
-- Сопоставлять ответы с ожидающими вызовами
-- Обрабатывать таймауты, отмены, ошибки
-- Писать switch/case для диспетчеризации на принимающей стороне
+- Assign a unique ID to each request
+- Return that ID in the response
+- Correlate responses with pending calls
+- Handle timeouts, cancellations, errors
+- Write switch/case dispatching on the receiving side
 
-### Решение
+### Solution
 
-Определите интерфейс — получите типизированный клиент и автоматический диспетчер.
+Define an interface — get a typed client and an automatic dispatcher.
 
-### Определение RPC-контракта
+### Defining the RPC Contract
 
-Интерфейс, который знают обе стороны:
+An interface known to both sides:
 
 ```csharp
 public interface IOrderService
 {
-    // Request/Response — возвращает Task<IMessage>
+    // Request/Response — returns Task<IMessage>
     Task<PlaceOrderResponse> PlaceOrder(PlaceOrderRequest request, CancellationToken ct = default);
     Task<OrderInfo> GetOrder(GetOrderRequest request, CancellationToken ct = default);
 
-    // Fire-and-forget — возвращает Task, сервер отправит подтверждение (status OK)
+    // Fire-and-forget — returns Task, server sends an acknowledgement (status OK)
     Task CancelOrder(CancelOrderRequest request, CancellationToken ct = default);
 
-    // CancellationToken опционален
+    // CancellationToken is optional
     Task<HealthCheckResponse> HealthCheck(HealthCheckRequest request);
 }
 ```
 
-**Правила:**
-- Первый параметр — `IMessage` (protobuf-сообщение)
-- Второй параметр (опционально) — `CancellationToken`
-- Возвращаемый тип — `Task` или `Task<T>` где `T : IMessage`
-- Каждый тип request-сообщения маппится ровно на один метод (по protobuf TypeUrl)
-- Методы без параметров **не поддерживаются** — `StreamRpcDispatcher.Create` бросит `ArgumentException` при попытке зарегистрировать такой интерфейс. Если нужен вызов без данных, используйте пустое protobuf-сообщение:
+**Rules:**
+- First parameter — `IMessage` (protobuf message)
+- Second parameter (optional) — `CancellationToken`
+- Return type — `Task` or `Task<T>` where `T : IMessage`
+- Each request message type maps to exactly one method (by protobuf TypeUrl)
+- Methods without parameters **are not supported** — `StreamRpcDispatcher.Create` will throw `ArgumentException`. If you need a call with no data, use an empty protobuf message:
 
 ```protobuf
-message Empty {}  // или google.protobuf.Empty
+message Empty {}  // or google.protobuf.Empty
 ```
 
 ```csharp
@@ -386,23 +386,23 @@ Task<StatusResponse> GetStatus(Empty request, CancellationToken ct = default);
 
 ### Proto: RequestEnvelope / ResponseEnvelope
 
-Библиотека использует два envelope-сообщения для корреляции:
+The library uses two envelope messages for correlation:
 
 ```protobuf
 message RequestEnvelope {
-  string request_id = 1;              // GUID, генерируется автоматически
-  google.protobuf.Any payload = 2;    // Упакованный IMessage запроса
+  string request_id = 1;              // GUID, generated automatically
+  google.protobuf.Any payload = 2;    // Packed IMessage request
 }
 
 message ResponseEnvelope {
-  string in_reply_to_request_id = 1;  // Совпадает с request_id
-  int32 status = 2;                   // Grpc.Core.StatusCode (0 = OK)
-  string error = 3;                   // Текст ошибки (при status != 0)
-  google.protobuf.Any payload = 4;    // Упакованный IMessage ответа
+  string in_reply_to_request_id = 1;  // Matches RequestEnvelope.request_id
+  int32 status = 2;                   // Grpc.Core.StatusCode as int (0 = OK)
+  string error = 3;                   // Error text (when status != 0)
+  google.protobuf.Any payload = 4;    // Packed IMessage response
 }
 ```
 
-Встройте их в свой прикладной proto:
+Embed them in your application-level proto:
 
 ```protobuf
 import "Proto/streaming_rpc.proto";
@@ -417,12 +417,12 @@ message MyStreamMessage {
 }
 ```
 
-### Вызывающая сторона: StreamRpcClient + CreateProxy
+### Caller Side: StreamRpcClient + CreateProxy
 
 ```csharp
 var options = new StreamingOptions { DefaultCommandTimeoutSeconds = 10 };
 
-// Создаём RPC-клиент, передавая функцию отправки
+// Create an RPC client with a send function
 var rpcClient = new StreamRpcClient(
     sendFunc: async (envelope, ct) =>
     {
@@ -431,35 +431,35 @@ var rpcClient = new StreamRpcClient(
     options,
     logger);
 
-// Получаем типизированный прокси
+// Get a typed proxy
 var orders = rpcClient.CreateProxy<IOrderService>();
 
-// Вызываем как обычные async-методы
+// Call as regular async methods
 var result = await orders.PlaceOrder(new PlaceOrderRequest { ItemId = "sku-42", Quantity = 2 }, ct);
 Console.WriteLine($"Order placed: {result.OrderId}");
 
 await orders.CancelOrder(new CancelOrderRequest { OrderId = result.OrderId }, ct);
 ```
 
-В цикле получения сообщений передавайте ответы обратно в клиент:
+In the message receive loop, feed responses back to the client:
 
 ```csharp
 if (msg.Response != null)
     rpcClient.TryComplete(msg.Response);
 ```
 
-**Жизненный цикл:** один `StreamRpcClient` на одно соединение. При обрыве — `Dispose()` (все pending вызовы отменятся), при переподключении — новый экземпляр.
+**Lifecycle:** one `StreamRpcClient` per connection. On disconnect — `Dispose()` (all pending calls get cancelled), on reconnect — create a new instance.
 
-| Метод | Описание |
-|-------|----------|
-| `CreateProxy<T>()` | Создаёт `DispatchProxy`, реализующий интерфейс `T` |
-| `TryComplete(ResponseEnvelope)` | Сопоставляет ответ с ожидающим вызовом по `InReplyToRequestId`. Возвращает `false` если вызов не найден |
-| `CancelAll()` | Отменяет все ожидающие вызовы |
-| `Dispose()` | `CancelAll()` + запрет новых вызовов |
+| Method | Description |
+|--------|-------------|
+| `CreateProxy<T>()` | Creates a `DispatchProxy` implementing interface `T` |
+| `TryComplete(ResponseEnvelope)` | Matches a response to a pending call by `InReplyToRequestId`. Returns `false` if no matching call found |
+| `CancelAll()` | Cancels all pending calls |
+| `Dispose()` | `CancelAll()` + prevents new calls |
 
-### Принимающая сторона: StreamRpcDispatcher
+### Handler Side: StreamRpcDispatcher
 
-Реализуйте интерфейс:
+Implement the interface:
 
 ```csharp
 public class OrderServiceHandler : IOrderService
@@ -488,7 +488,7 @@ public class OrderServiceHandler : IOrderService
     public async Task CancelOrder(CancelOrderRequest request, CancellationToken ct)
     {
         await _orders.CancelAsync(request.OrderId, ct);
-        // Для void-методов достаточно вернуть Task — клиент получит status OK
+        // For void methods, just return Task — the caller receives status OK
     }
 
     public Task<HealthCheckResponse> HealthCheck(HealthCheckRequest request)
@@ -501,7 +501,7 @@ public class OrderServiceHandler : IOrderService
 }
 ```
 
-Создайте диспетчер и маршрутизируйте входящие запросы:
+Create a dispatcher and route incoming requests:
 
 ```csharp
 var dispatcher = StreamRpcDispatcher.Create<IOrderService>(
@@ -512,46 +512,46 @@ var dispatcher = StreamRpcDispatcher.Create<IOrderService>(
     },
     logger);
 
-// В цикле получения сообщений:
+// In the message receive loop:
 if (msg.Request != null)
     await dispatcher.DispatchAsync(msg.Request, ct);
 ```
 
-`Create<T>()` при вызове:
-1. Сканирует все методы интерфейса
-2. Валидирует сигнатуры (fail-fast при ошибках)
-3. Строит маппинг `TypeUrl → обработчик` через protobuf-дескрипторы
-4. Бросает `ArgumentException` при невалидном контракте (не-IMessage параметр, метод без параметров, неправильный return type)
+`Create<T>()` at creation time:
+1. Scans all methods on the interface
+2. Validates signatures (fail-fast on errors)
+3. Builds a `TypeUrl → handler` mapping via protobuf descriptors
+4. Throws `ArgumentException` on invalid contract (non-IMessage parameter, parameterless method, wrong return type)
 
-### Обработка ошибок
+### Error Handling
 
-**На стороне обработчика:**
+**Handler side:**
 
-| Что бросает handler | ResponseEnvelope.Status | ResponseEnvelope.Error |
-|---------------------|------------------------|----------------------|
-| Возврат результата | `OK (0)` | — |
-| `StreamRpcException(NotFound, "...")` | `NotFound (5)` | Текст из исключения |
-| `StreamRpcException(ResourceExhausted, "...")` | `ResourceExhausted (8)` | Текст из исключения |
-| `InvalidOperationException("...")` | `Internal (13)` | Текст из исключения |
-| Любой другой `Exception` | `Internal (13)` | `ex.Message` |
+| Handler behavior | ResponseEnvelope.Status | ResponseEnvelope.Error |
+|------------------|------------------------|----------------------|
+| Returns result | `OK (0)` | — |
+| `StreamRpcException(NotFound, "...")` | `NotFound (5)` | Exception message |
+| `StreamRpcException(ResourceExhausted, "...")` | `ResourceExhausted (8)` | Exception message |
+| `InvalidOperationException("...")` | `Internal (13)` | Exception message |
+| Any other `Exception` | `Internal (13)` | `ex.Message` |
 
-**На стороне диспетчера (до вызова handler):**
+**Dispatcher side (before handler invocation):**
 
-| Ситуация | StatusCode |
-|----------|-----------|
-| `TypeUrl` не найден в маппинге | `Unimplemented (12)` |
-| Не удалось распарсить payload | `InvalidArgument (3)` |
+| Situation | StatusCode |
+|-----------|-----------|
+| `TypeUrl` not found in mapping | `Unimplemented (12)` |
+| Failed to parse payload | `InvalidArgument (3)` |
 | Payload is null | `InvalidArgument (3)` |
 
-**На стороне вызывающего:**
+**Caller side:**
 
-| Сценарий | Исключение |
-|----------|-----------|
-| Ответ с `status != OK` | `StreamRpcException` с соответствующим `StatusCode` |
-| Нет ответа в течение таймаута | `TimeoutException` |
-| Вызов отменён через `CancellationToken` | `OperationCanceledException` |
-| Клиент disposed / `CancelAll()` | `OperationCanceledException` |
-| Вызов после `Dispose()` | `ObjectDisposedException` |
+| Scenario | Exception |
+|----------|----------|
+| Response with `status != OK` | `StreamRpcException` with matching `StatusCode` |
+| No response within timeout | `TimeoutException` |
+| Call cancelled via `CancellationToken` | `OperationCanceledException` |
+| Client disposed / `CancelAll()` | `OperationCanceledException` |
+| Call after `Dispose()` | `ObjectDisposedException` |
 
 ```csharp
 try
@@ -572,35 +572,35 @@ catch (TimeoutException)
 }
 ```
 
-### Двунаправленный RPC
+### Bidirectional RPC
 
-Обе стороны могут одновременно быть и вызывающей, и принимающей. Создайте `StreamRpcClient` + `StreamRpcDispatcher` на каждой стороне с разными интерфейсами:
+Both sides can be callers and handlers simultaneously. Create `StreamRpcClient` + `StreamRpcDispatcher` on each side with different interfaces:
 
 ```csharp
-// Контракты
-public interface IClientToServerRpc { ... }  // клиент вызывает, сервер обрабатывает
-public interface IServerToClientRpc { ... }  // сервер вызывает, клиент обрабатывает
+// Contracts
+public interface IClientToServerRpc { ... }  // client calls, server handles
+public interface IServerToClientRpc { ... }  // server calls, client handles
 
-// На сервере:
+// On the server:
 var dispatcher = StreamRpcDispatcher.Create<IClientToServerRpc>(serverHandler, sendResponse);
 var rpcClient = new StreamRpcClient(sendRequest, options);
 var clientProxy = rpcClient.CreateProxy<IServerToClientRpc>();
 
-// Маршрутизация входящих:
+// Route incoming messages:
 if (msg.Request != null)
-    await dispatcher.DispatchAsync(msg.Request, ct);  // запрос от клиента
+    await dispatcher.DispatchAsync(msg.Request, ct);  // request from client
 if (msg.Response != null)
-    rpcClient.TryComplete(msg.Response);               // ответ клиента на наш запрос
+    rpcClient.TryComplete(msg.Response);               // client's response to our request
 
-// Вызов клиента с сервера:
+// Call client from server:
 await clientProxy.PushNotification(new Notification { Text = "Your order shipped" }, ct);
 ```
 
 ---
 
-## Полный пример: ReconnectingStreamClient + RPC
+## Full Example: ReconnectingStreamClient + RPC
 
-Клиент, который автоматически переподключается и предоставляет typed RPC:
+A client that auto-reconnects and exposes typed RPC:
 
 ```csharp
 public class OrderStreamClient
@@ -655,7 +655,7 @@ public class OrderStreamClient
 }
 ```
 
-Использование:
+Usage:
 
 ```csharp
 // DI
@@ -663,50 +663,17 @@ services.AddStreaming(configuration);
 services.AddSingleton<OrderStreamClient>();
 services.AddHostedService(sp => sp.GetRequiredService<OrderStreamClient>());
 
-// В коде
+// In code
 var result = await orderClient.Orders!.PlaceOrder(
     new PlaceOrderRequest { ItemId = "sku-42", Quantity = 1 }, ct);
 ```
 
----
-
-## Структура проекта
-
-```
-src/GrpcStreamingUtils/
-├── Connection/
-│   ├── IStreamConnection.cs          — интерфейс соединения
-│   ├── StreamConnectionBase.cs       — абстрактная база с keep-alive и write lock
-│   ├── ClientStreamConnection.cs     — клиентская обёртка над AsyncDuplexStreamingCall
-│   ├── ServerStreamConnection.cs     — серверная обёртка над IAsyncStreamReader/Writer
-│   ├── CloseReason.cs                — Normal / Timeout / Error
-│   └── StreamConnectionClosedArgs.cs — аргументы события закрытия
-├── Client/
-│   └── ReconnectingStreamClient.cs   — BackgroundService с auto-reconnect
-├── KeepAlive/
-│   ├── StreamKeepAliveMonitor.cs     — фоновый мониторинг всех соединений
-│   └── StreamKeepAliveManager.cs     — per-connection keep-alive состояние
-├── Rpc/
-│   ├── StreamRpcClient.cs            — корреляция запрос/ответ
-│   ├── StreamRpcProxy.cs             — DispatchProxy для typed вызовов
-│   ├── StreamRpcDispatcher.cs        — автодиспетчер входящих запросов
-│   └── StreamRpcException.cs         — ошибка с gRPC StatusCode
-├── Configuration/
-│   └── StreamingOptions.cs           — все таймауты и настройки
-├── Exceptions/
-│   └── StreamNotEstablishedException.cs
-├── Extensions/
-│   └── ServiceCollectionExtensions.cs — AddStreaming()
-└── Proto/
-    └── streaming_rpc.proto           — RequestEnvelope, ResponseEnvelope
-```
-
-## Требования
+## Requirements
 
 - .NET 8.0+
 - Google.Protobuf 3.29.6+
 - Grpc.AspNetCore 2.70.0+
 
-## Лицензия
+## License
 
 MIT
