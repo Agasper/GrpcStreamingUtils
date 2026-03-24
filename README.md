@@ -1,275 +1,71 @@
 # Niarru.GrpcStreamingUtils
 
-A .NET 8 library for building typed RPC-over-stream communication on top of gRPC bidirectional streams. Provides request/response correlation, automatic dispatching, keep-alive management, and reconnection logic — all with a clean interface-based API.
+Библиотека для .NET 8, упрощающая работу с gRPC bidirectional streams. Берёт на себя рутину: управление жизненным циклом соединения, сериализация записей, keep-alive, автоматический реконнект с backoff, и — поверх всего этого — типизированный RPC-over-stream фреймворк.
 
-## Features
+## Какую проблему решает
 
-- **Typed RPC over gRPC streams** — define an interface, get a proxy client and auto-dispatcher
-- **Request/response correlation** — automatic matching via `RequestEnvelope` / `ResponseEnvelope`
-- **Timeout & cancellation** — per-call timeouts with configurable defaults
-- **Error propagation** — `StreamRpcException` carries `Grpc.Core.StatusCode` across the wire
-- **Keep-alive** — automatic ping/pong and idle timeout detection
-- **Reconnection** — exponential backoff reconnect client as a `BackgroundService`
-- **Thread-safe** — concurrent writes are serialized, all state is protected
+gRPC bidirectional streaming — мощный инструмент, но работать с ним напрямую неудобно:
 
-## Installation
+- **Конкурентная запись** — `IServerStreamWriter` и `IClientStreamWriter` не потокобезопасны. Два одновременных `WriteAsync` — и stream сломан. Приходится вручную оборачивать каждую запись в `SemaphoreSlim`.
+- **Keep-alive** — gRPC HTTP/2 ping'и работают на транспортном уровне, но не спасают от «зависших» соединений на уровне приложения. Нужно слать свои ping-сообщения и отслеживать idle timeout.
+- **Переподключение** — при обрыве stream на клиенте нужно переподключаться, причём с exponential backoff, чтобы не заDDoSить сервер.
+- **Жизненный цикл** — нужно аккуратно обрабатывать закрытие stream: cancellation, gRPC errors, нормальное завершение, dispose. Легко потерять ресурсы или получить мёртвый stream без уведомления.
+- **RPC поверх stream** — если хочется request/response семантику поверх bidirectional stream (а не отдельные unary gRPC вызовы), приходится вручную писать корреляцию запрос/ответ, диспетчеризацию, обработку ошибок и таймаутов.
 
-Add a project reference or (when published) install via NuGet:
+Эта библиотека решает всё вышеперечисленное в двух слоях:
+
+1. **Connection layer** — потокобезопасные обёртки над gRPC stream, keep-alive мониторинг, автоматический реконнект
+2. **RPC layer** — типизированный request/response поверх stream через интерфейсы и `DispatchProxy`
+
+Слои независимы: можно использовать только connections без RPC.
+
+---
+
+## Установка
 
 ```bash
 dotnet add package Niarru.GrpcStreamingUtils
 ```
 
-## Quick Start
-
-### 1. Define a shared RPC contract
-
-Create an interface in a project shared between client and server. Each method must:
-- Have `IMessage` (protobuf) as the first parameter
-- Optionally accept `CancellationToken` as the second parameter
-- Return `Task` (void) or `Task<T>` where `T : IMessage`
-
-```csharp
-public interface IBattleServerRpc
-{
-    Task<RoomCreated> CreateRoom(CreateRoom request, CancellationToken ct = default);
-    Task<ModifyRoomResult> ModifyRoom(ModifyRoom request, CancellationToken ct = default);
-    Task DeleteRoom(DeleteRoom request, CancellationToken ct = default);
-}
-```
-
-### 2. Calling side (client)
-
-```csharp
-var options = new StreamingOptions { DefaultCommandTimeoutSeconds = 10 };
-
-var rpcClient = new StreamRpcClient(
-    sendFunc: async (envelope, ct) =>
-    {
-        // Wrap RequestEnvelope into your stream message and send
-        await connection.SendAsync(new MyStreamMessage { Request = envelope }, ct);
-    },
-    options,
-    logger);
-
-// Create a typed proxy
-var rpc = rpcClient.CreateProxy<IBattleServerRpc>();
-
-// Make RPC calls as regular async method calls
-var result = await rpc.CreateRoom(new CreateRoom { Name = "Room1" }, ct);
-Console.WriteLine(result.Room.Id);
-```
-
-When receiving messages from the stream, feed responses back:
-
-```csharp
-// In your message receive loop:
-if (msg.Response != null)
-    rpcClient.TryComplete(msg.Response);
-```
-
-### 3. Handling side (server)
-
-Implement the interface:
-
-```csharp
-public class BattleServerRpcHandler : IBattleServerRpc
-{
-    public async Task<RoomCreated> CreateRoom(CreateRoom request, CancellationToken ct)
-    {
-        var room = await _roomService.CreateAsync(request.Name, ct);
-        return new RoomCreated { Room = room };
-    }
-
-    public async Task<ModifyRoomResult> ModifyRoom(ModifyRoom request, CancellationToken ct)
-    {
-        // ...
-        return new ModifyRoomResult { Success = true };
-    }
-
-    public Task DeleteRoom(DeleteRoom request, CancellationToken ct)
-    {
-        _roomService.Delete(request.RoomId);
-        return Task.CompletedTask;
-    }
-}
-```
-
-Create a dispatcher and route incoming requests:
-
-```csharp
-var dispatcher = StreamRpcDispatcher.Create<IBattleServerRpc>(
-    handler: new BattleServerRpcHandler(),
-    sendFunc: async (envelope, ct) =>
-    {
-        await connection.SendAsync(new MyStreamMessage { Response = envelope }, ct);
-    },
-    logger);
-
-// In your message receive loop:
-if (msg.Request != null)
-    await dispatcher.DispatchAsync(msg.Request, ct);
-```
-
 ---
 
-## Detailed Usage
+## Слой 1: Connection Management
 
-### RPC Contract Rules
+### Проблема
 
-```csharp
-public interface IMyService
-{
-    // Request/Response — first param is IMessage, returns Task<IMessage>
-    Task<GetUserResponse> GetUser(GetUserRequest request, CancellationToken ct = default);
-
-    // Fire-and-forget — returns Task (void), server still sends acknowledgement
-    Task NotifyEvent(EventNotification request, CancellationToken ct = default);
-
-    // CancellationToken is optional
-    Task<PingResponse> Ping(PingRequest request);
-}
-```
-
-**Constraints:**
-- First parameter **must** implement `Google.Protobuf.IMessage`
-- Return type **must** be `Task` or `Task<T>` where `T : IMessage`
-- Each request message type maps to exactly one handler method (via protobuf type URL)
-
-### StreamRpcClient
-
-The client manages request/response correlation over a single stream.
+Типичный код работы с gRPC duplex stream:
 
 ```csharp
-var client = new StreamRpcClient(sendFunc, options, logger);
+// Небезопасно: два одновременных WriteAsync сломают stream
+var stream = client.BiDirectionalStream();
+await stream.RequestStream.WriteAsync(msg1); // из потока A
+await stream.RequestStream.WriteAsync(msg2); // из потока B — гонка!
 ```
 
-| Method | Description |
-|--------|-------------|
-| `CreateProxy<T>()` | Creates a `DispatchProxy` implementing `T` |
-| `TryComplete(ResponseEnvelope)` | Resolves a pending call by `InReplyToRequestId` |
-| `CancelAll()` | Cancels all pending calls |
-| `Dispose()` | Calls `CancelAll()` and prevents new calls |
+### Решение: StreamConnectionBase
 
-**Lifecycle:** Create one `StreamRpcClient` per stream connection. When the connection drops, dispose the client (all pending calls get cancelled) and create a new one on reconnect.
+`StreamConnectionBase<TIncoming, TOutgoing>` — абстрактная обёртка, реализующая `IStreamConnection`:
 
-### StreamRpcProxy
-
-Created via `StreamRpcClient.CreateProxy<T>()`. Intercepts interface method calls and:
-
-1. Packs the `IMessage` argument into `RequestEnvelope.Payload` via `Any.Pack()`
-2. Sends the envelope through the client's `sendFunc`
-3. Waits for `TryComplete()` to resolve the matching response
-4. Unpacks `ResponseEnvelope.Payload` via `Any.Unpack<T>()` and returns it
-5. For `Task` (void) methods — waits for acknowledgement but ignores payload
-
-### StreamRpcDispatcher
-
-Created via `StreamRpcDispatcher.Create<T>(handler, sendFunc, logger)`. At creation time:
-
-1. Scans all methods on the interface
-2. Validates signatures (fail-fast on invalid contracts)
-3. Builds a `TypeUrl → MethodHandler` mapping using protobuf descriptors
-
-On `DispatchAsync(RequestEnvelope, CancellationToken)`:
-
-1. Looks up handler by `Payload.TypeUrl`
-2. Parses the payload using the pre-built `MessageParser`
-3. Invokes the handler method
-4. Packs the result into `ResponseEnvelope` and sends it back
-
-**Error mapping:**
-
-| Situation | StatusCode | Error |
-|-----------|-----------|-------|
-| Handler returns normally | `OK (0)` | — |
-| Handler throws `StreamRpcException` | Exception's `StatusCode` | Exception's `Message` |
-| Handler throws any other `Exception` | `Internal (13)` | Exception's `Message` |
-| Unknown `TypeUrl` | `Unimplemented (12)` | `"No handler for '...'"` |
-| Failed to parse payload | `InvalidArgument (3)` | Parse error message |
-| Null payload | `InvalidArgument (3)` | `"Request payload is null."` |
-
-### StreamRpcException
-
-Typed exception carrying a gRPC `StatusCode`. Use it in handlers to return specific error codes:
+- **Потокобезопасная запись** — все `SendAsync` сериализуются через `SemaphoreSlim`
+- **Цикл чтения** — `RunAsync` читает stream до завершения, вызывая `OnMessageReceivedAsync` на каждое сообщение
+- **Lifecycle events** — `OnConnectionClosed(CloseReason)` при нормальном закрытии, таймауте или ошибке
+- **Интеграция с keep-alive** — автоматически обновляет время последнего сообщения
+- **Корректный dispose** — cancel, очистка ресурсов, ожидание завершения записей
 
 ```csharp
-public async Task<RoomCreated> CreateRoom(CreateRoom request, CancellationToken ct)
+public interface IStreamConnection<TIncoming, TOutgoing> : IAsyncDisposable
 {
-    if (string.IsNullOrEmpty(request.Name))
-        throw new StreamRpcException(StatusCode.InvalidArgument, "Room name is required");
-
-    if (!await HasCapacity(ct))
-        throw new StreamRpcException(StatusCode.ResourceExhausted, "No capacity for new rooms");
-
-    var room = await FindRoom(request.Name, ct);
-    if (room != null)
-        throw new StreamRpcException(StatusCode.AlreadyExists, $"Room '{request.Name}' already exists");
-
-    // ...
+    Guid ConnectionId { get; }
+    CancellationToken ConnectionClosed { get; }
+    Task RunAsync(CancellationToken cancellationToken);
+    Task SendAsync(TOutgoing message, CancellationToken cancellationToken);
+    Task CloseAsync(CancellationToken cancellationToken);
 }
 ```
 
-On the calling side, catch it:
+### ClientStreamConnection — клиентская сторона
 
-```csharp
-try
-{
-    var result = await rpc.CreateRoom(new CreateRoom { Name = "Room1" }, ct);
-}
-catch (StreamRpcException ex) when (ex.StatusCode == StatusCode.ResourceExhausted)
-{
-    logger.LogWarning("Server is at capacity: {Error}", ex.Message);
-}
-catch (StreamRpcException ex)
-{
-    logger.LogError("RPC failed with {StatusCode}: {Error}", ex.StatusCode, ex.Message);
-}
-catch (TimeoutException)
-{
-    logger.LogError("RPC call timed out");
-}
-```
-
-### Proto Messages
-
-The library uses two envelope messages defined in `streaming_rpc.proto`:
-
-```protobuf
-message RequestEnvelope {
-  string request_id = 1;              // Unique correlation ID (GUID)
-  google.protobuf.Any payload = 2;    // Packed IMessage request
-}
-
-message ResponseEnvelope {
-  string in_reply_to_request_id = 1;  // Matches RequestEnvelope.request_id
-  int32 status = 2;                   // Grpc.Core.StatusCode as int (0 = OK)
-  string error = 3;                   // Error text (when status != 0)
-  google.protobuf.Any payload = 4;    // Packed IMessage response (when status == 0)
-}
-```
-
-Embed these envelopes in your application-level stream messages:
-
-```protobuf
-// Your application proto
-message MyStreamMessage {
-  oneof content {
-    RequestEnvelope request = 1;
-    ResponseEnvelope response = 2;
-    Ping ping = 3;
-    // ...other message types...
-  }
-}
-```
-
----
-
-## Connection Management
-
-### ClientStreamConnection
-
-Abstract base for client-side gRPC duplex stream connections. Provides write serialization, keep-alive integration, and lifecycle events.
+Оборачивает `AsyncDuplexStreamingCall<TOutgoing, TIncoming>`:
 
 ```csharp
 public class MyClientConnection : ClientStreamConnection<ServerMessage, ClientMessage>
@@ -287,123 +83,232 @@ public class MyClientConnection : ClientStreamConnection<ServerMessage, ClientMe
         _onMessage = onMessage;
     }
 
+    // Какое сообщение отправлять как ping
     protected override ClientMessage CreatePingMessage()
         => new ClientMessage { Ping = new Ping() };
 
+    // Вызывается на каждое входящее сообщение
     protected override Task OnMessageReceivedAsync(ServerMessage message, CancellationToken ct)
     {
         _onMessage(message);
         return Task.CompletedTask;
     }
 
+    // Опционально: реакция на закрытие
     protected override void OnConnectionClosed(StreamConnectionClosedArgs args)
     {
         if (args.Reason == CloseReason.Error)
-            Console.WriteLine($"Connection error: {args.Exception?.Message}");
+            Console.WriteLine($"Connection lost: {args.Exception?.Message}");
     }
 }
 ```
 
-### ServerStreamConnection
+Использование:
 
-Abstract base for server-side connections within a gRPC service method.
+```csharp
+var stream = grpcClient.BiDirectionalStream(cancellationToken: ct);
+var connection = new MyClientConnection(stream, options, TimeProvider.System, logger,
+    msg => Console.WriteLine($"Got: {msg}"));
+
+// Запуск чтения (блокирует до закрытия stream)
+_ = connection.RunAsync(ct);
+
+// Потокобезопасная отправка из любого потока
+await connection.SendAsync(new ClientMessage { Text = "hello" }, ct);
+await connection.SendAsync(new ClientMessage { Text = "world" }, ct);
+
+// Закрытие
+await connection.CloseAsync(ct);
+await connection.DisposeAsync();
+```
+
+### ServerStreamConnection — серверная сторона
+
+Оборачивает `IAsyncStreamReader` + `IServerStreamWriter` внутри gRPC метода:
 
 ```csharp
 public class MyServerConnection : ServerStreamConnection<ClientMessage, ServerMessage>
 {
-    private readonly StreamRpcDispatcher _dispatcher;
-
     public MyServerConnection(
         IAsyncStreamReader<ClientMessage> requestStream,
         IServerStreamWriter<ServerMessage> responseStream,
         StreamingOptions options,
         TimeProvider timeProvider,
         CancellationToken grpcCallCancellation,
-        ILogger logger,
-        StreamRpcDispatcher dispatcher)
+        ILogger logger)
         : base(requestStream, responseStream, options, timeProvider, grpcCallCancellation, logger)
-    {
-        _dispatcher = dispatcher;
-    }
+    { }
 
     protected override ServerMessage CreatePingMessage()
         => new ServerMessage { Pong = new Pong() };
 
     protected override async Task OnMessageReceivedAsync(ClientMessage message, CancellationToken ct)
     {
-        if (message.Request != null)
-            await _dispatcher.DispatchAsync(message.Request, ct);
+        // Обработка входящих сообщений от клиента
+        if (message.Text != null)
+        {
+            await SendAsync(new ServerMessage { Text = $"Echo: {message.Text}" }, ct);
+        }
     }
 }
 ```
 
-### ReconnectingStreamClient
-
-A `BackgroundService` that automatically reconnects on stream failure with exponential backoff.
+Использование в gRPC сервисе:
 
 ```csharp
-public class MyStreamClient : ReconnectingStreamClient<MyClientConnection, ServerMessage, ClientMessage>
+public override async Task BiDirectionalStream(
+    IAsyncStreamReader<ClientMessage> requestStream,
+    IServerStreamWriter<ServerMessage> responseStream,
+    ServerCallContext context)
 {
-    private readonly MyGrpcService.MyGrpcServiceClient _grpcClient;
-    private StreamRpcClient? _rpcClient;
-    private IBattleServerRpc? _rpc;
+    var connection = new MyServerConnection(
+        requestStream, responseStream, _options,
+        TimeProvider.System, context.CancellationToken, _logger);
 
-    public MyStreamClient(
-        MyGrpcService.MyGrpcServiceClient grpcClient,
-        StreamKeepAliveMonitor keepAliveMonitor,
-        StreamingOptions options,
-        TimeProvider timeProvider,
-        ILogger<MyStreamClient> logger)
-        : base(keepAliveMonitor, options, timeProvider, logger)
+    _keepAliveMonitor.Register(connection);
+    try
     {
-        _grpcClient = grpcClient;
+        await connection.RunAsync(context.CancellationToken);
     }
-
-    protected override string ClientName => "MyStreamClient";
-
-    protected override AsyncDuplexStreamingCall<ClientMessage, ServerMessage> CreateStream(
-        CancellationToken ct)
-        => _grpcClient.BiDirectionalStream(cancellationToken: ct);
-
-    protected override MyClientConnection CreateConnection(
-        AsyncDuplexStreamingCall<ClientMessage, ServerMessage> stream)
+    finally
     {
-        _rpcClient?.Dispose();
-        _rpcClient = new StreamRpcClient(
-            async (env, ct) => await SendAsync(new ClientMessage { Request = env }, ct),
-            _streamingOptions,
-            Logger);
-        _rpc = _rpcClient.CreateProxy<IBattleServerRpc>();
-
-        return new MyClientConnection(stream, _streamingOptions, TimeProvider, Logger,
-            msg =>
-            {
-                if (msg.Response != null)
-                    _rpcClient.TryComplete(msg.Response);
-            });
+        _keepAliveMonitor.Unregister(connection);
+        await connection.DisposeAsync();
     }
-
-    protected override Task SendHandshakeAsync(
-        AsyncDuplexStreamingCall<ClientMessage, ServerMessage> stream,
-        CancellationToken ct)
-    {
-        // Optional: send auth/handshake before entering the read loop
-        return stream.RequestStream.WriteAsync(
-            new ClientMessage { Handshake = new Handshake { Token = "..." } });
-    }
-
-    // Expose RPC proxy for external use
-    public IBattleServerRpc Rpc => _rpc ?? throw new StreamNotEstablishedException();
 }
 ```
+
+### CloseReason
+
+Причина закрытия соединения, приходит в `OnConnectionClosed`:
+
+| Значение | Когда |
+|----------|-------|
+| `Normal` | Stream завершился штатно, cancellation, или gRPC Cancelled |
+| `Timeout` | Не используется напрямую (таймаут обрабатывается keep-alive через cancel) |
+| `Error` | Необработанное исключение при чтении stream |
 
 ---
 
-## Configuration
+## Keep-Alive
+
+### Проблема
+
+gRPC HTTP/2 keep-alive работает на уровне TCP-соединения, но не знает о состоянии вашего прикладного протокола. Клиент может «зависнуть» — не слать данные, но TCP-соединение формально живо. Или сервер может не заметить, что клиент давно отключился.
+
+### Решение: StreamKeepAliveMonitor + StreamKeepAliveManager
+
+Каждый `StreamConnectionBase` автоматически создаёт `StreamKeepAliveManager`, который:
+
+- Отслеживает время последнего полученного сообщения
+- По расписанию отправляет ping-сообщения (через `CreatePingMessage()`)
+- При превышении `IdleTimeoutSeconds` без сообщений — закрывает соединение
+
+`StreamKeepAliveMonitor` — `BackgroundService`, который каждую секунду обходит все зарегистрированные соединения и вызывает их keep-alive логику.
+
+```csharp
+// Регистрация в DI (или вручную):
+services.AddSingleton<StreamKeepAliveMonitor>();
+services.AddHostedService(sp => sp.GetRequiredService<StreamKeepAliveMonitor>());
+
+// Регистрация соединения:
+_keepAliveMonitor.Register(connection);   // начать мониторинг
+_keepAliveMonitor.Unregister(connection); // прекратить мониторинг
+```
+
+Закрытые соединения автоматически удаляются из мониторинга.
+
+---
+
+## Автоматический реконнект
+
+### Проблема
+
+При обрыве gRPC stream на клиенте нужно:
+- Переподключиться
+- Не заDDoSить сервер при массовом отключении
+- Отправить handshake (авторизация, идентификация)
+- Пересоздать connection и зарегистрировать его в keep-alive
+
+### Решение: ReconnectingStreamClient
+
+`BackgroundService` с экспоненциальным backoff. Переопределите 3-4 метода, и получите устойчивый к обрывам клиент:
+
+```csharp
+public class ChatStreamClient : ReconnectingStreamClient<MyChatConnection, ServerMessage, ClientMessage>
+{
+    private readonly ChatService.ChatServiceClient _grpcClient;
+    private readonly string _userId;
+
+    public ChatStreamClient(
+        ChatService.ChatServiceClient grpcClient,
+        string userId,
+        StreamKeepAliveMonitor keepAliveMonitor,
+        StreamingOptions options,
+        TimeProvider timeProvider,
+        ILogger<ChatStreamClient> logger)
+        : base(keepAliveMonitor, options, timeProvider, logger)
+    {
+        _grpcClient = grpcClient;
+        _userId = userId;
+    }
+
+    // Имя клиента для логов
+    protected override string ClientName => "ChatStreamClient";
+
+    // Как создать gRPC stream
+    protected override AsyncDuplexStreamingCall<ClientMessage, ServerMessage> CreateStream(
+        CancellationToken ct)
+        => _grpcClient.ChatStream(cancellationToken: ct);
+
+    // Как создать connection из stream
+    protected override MyChatConnection CreateConnection(
+        AsyncDuplexStreamingCall<ClientMessage, ServerMessage> stream)
+        => new MyChatConnection(stream, _streamingOptions, TimeProvider, Logger,
+            msg => HandleMessage(msg));
+
+    // Опционально: handshake при подключении (до RunAsync)
+    protected override async Task SendHandshakeAsync(
+        AsyncDuplexStreamingCall<ClientMessage, ServerMessage> stream,
+        CancellationToken ct)
+    {
+        await stream.RequestStream.WriteAsync(
+            new ClientMessage { Auth = new Auth { UserId = _userId } }, ct);
+    }
+
+    // Опционально: logging scope для всех логов клиента
+    protected override IDisposable? CreateLoggingScope()
+        => Logger.BeginScope(new Dictionary<string, object> { ["UserId"] = _userId });
+}
+```
+
+Поведение при обрыве:
+1. Stream обрывается → connection dispose → unregister из keep-alive
+2. Ждёт `InitialReconnectIntervalSeconds` (по умолчанию 1с)
+3. Пробует переподключиться
+4. При повторном обрыве — удваивает задержку до `MaxReconnectIntervalSeconds` (по умолчанию 60с)
+5. При успешном подключении — сбрасывает backoff
+
+Клиент также предоставляет:
+- `Connection` — текущий connection (или null)
+- `IsConnected` — есть ли активное соединение
+- `SendAsync()` — отправка через текущий connection (бросает `StreamNotEstablishedException` если не подключён)
+
+---
+
+## DI-регистрация и конфигурация
+
+### AddStreaming
+
+```csharp
+builder.Services.AddStreaming(builder.Configuration);
+```
+
+Регистрирует:
+- `StreamingOptions` из секции `"Streaming"` в конфигурации с валидацией
+- `StreamKeepAliveMonitor` как singleton + hosted service
 
 ### StreamingOptions
-
-Configure via `appsettings.json` section `"Streaming"`:
 
 ```json
 {
@@ -417,99 +322,382 @@ Configure via `appsettings.json` section `"Streaming"`:
 }
 ```
 
-| Property | Default | Description |
-|----------|---------|-------------|
-| `DefaultCommandTimeoutSeconds` | 15 | Default timeout for RPC calls |
-| `IdleTimeoutSeconds` | 30 | Close connection if no messages received |
-| `PingIntervalSeconds` | 10 | Interval between keep-alive pings |
-| `InitialReconnectIntervalSeconds` | 1 | First reconnect delay (1–300) |
-| `MaxReconnectIntervalSeconds` | 60 | Max reconnect delay after backoff (1–3600) |
-
-### DI Registration
-
-```csharp
-builder.Services.AddStreaming(builder.Configuration);
-```
-
-This registers:
-- `StreamingOptions` from configuration with validation
-- `StreamKeepAliveMonitor` as a singleton + hosted service
+| Параметр | По умолчанию | Диапазон | Описание |
+|----------|-------------|----------|----------|
+| `DefaultCommandTimeoutSeconds` | 15 | — | Таймаут RPC-вызовов по умолчанию |
+| `IdleTimeoutSeconds` | 30 | — | Закрыть соединение, если нет сообщений |
+| `PingIntervalSeconds` | 10 | — | Интервал отправки ping |
+| `InitialReconnectIntervalSeconds` | 1 | 1–300 | Первая задержка перед реконнектом |
+| `MaxReconnectIntervalSeconds` | 60 | 1–3600 | Максимальная задержка после backoff |
 
 ---
 
-## Bidirectional RPC
+## Слой 2: RPC-over-Stream
 
-Both sides can be callers and handlers simultaneously. Use `StreamRpcClient` + `StreamRpcDispatcher` on each side:
+### Проблема
+
+Bidirectional stream — это поток сообщений без семантики request/response. Если нужен аналог unary RPC, но через stream (чтобы не открывать новые HTTP/2 stream на каждый вызов), приходится вручную:
+
+- Присваивать каждому запросу ID
+- На ответе возвращать этот ID
+- Сопоставлять ответы с ожидающими вызовами
+- Обрабатывать таймауты, отмены, ошибки
+- Писать switch/case для диспетчеризации на принимающей стороне
+
+### Решение
+
+Определите интерфейс — получите типизированный клиент и автоматический диспетчер.
+
+### Определение RPC-контракта
+
+Интерфейс, который знают обе стороны:
 
 ```csharp
-// Server side: handles client requests AND can call client back
-var serverDispatcher = StreamRpcDispatcher.Create<IClientToServerRpc>(serverHandler, sendFunc);
-var serverRpcClient = new StreamRpcClient(sendFunc, options);
-var clientProxy = serverRpcClient.CreateProxy<IServerToClientRpc>();
+public interface IBattleServerRpc
+{
+    // Request/Response — возвращает Task<IMessage>
+    Task<RoomCreated> CreateRoom(CreateRoom request, CancellationToken ct = default);
+    Task<RoomInfo> GetRoom(GetRoomRequest request, CancellationToken ct = default);
 
-// On incoming message:
-if (msg.Request != null)
-    await serverDispatcher.DispatchAsync(msg.Request, ct);
+    // Fire-and-forget — возвращает Task, сервер отправит подтверждение (status OK)
+    Task DeleteRoom(DeleteRoom request, CancellationToken ct = default);
+
+    // CancellationToken опционален
+    Task<PingResult> Ping(PingRequest request);
+}
+```
+
+**Правила:**
+- Первый параметр — `IMessage` (protobuf-сообщение)
+- Второй параметр (опционально) — `CancellationToken`
+- Возвращаемый тип — `Task` или `Task<T>` где `T : IMessage`
+- Каждый тип request-сообщения маппится ровно на один метод (по protobuf TypeUrl)
+- Методы без параметров **не поддерживаются** — `StreamRpcDispatcher.Create` бросит `ArgumentException` при попытке зарегистрировать такой интерфейс. Если нужен вызов без данных, используйте пустое protobuf-сообщение:
+
+```protobuf
+message Empty {}  // или google.protobuf.Empty
+```
+
+```csharp
+Task<StatusResponse> GetStatus(Empty request, CancellationToken ct = default);
+```
+
+### Proto: RequestEnvelope / ResponseEnvelope
+
+Библиотека использует два envelope-сообщения для корреляции:
+
+```protobuf
+message RequestEnvelope {
+  string request_id = 1;              // GUID, генерируется автоматически
+  google.protobuf.Any payload = 2;    // Упакованный IMessage запроса
+}
+
+message ResponseEnvelope {
+  string in_reply_to_request_id = 1;  // Совпадает с request_id
+  int32 status = 2;                   // Grpc.Core.StatusCode (0 = OK)
+  string error = 3;                   // Текст ошибки (при status != 0)
+  google.protobuf.Any payload = 4;    // Упакованный IMessage ответа
+}
+```
+
+Встройте их в свой прикладной proto:
+
+```protobuf
+import "Proto/streaming_rpc.proto";
+
+message MyStreamMessage {
+  oneof content {
+    RequestEnvelope request = 1;
+    ResponseEnvelope response = 2;
+    Ping ping = 3;
+    // ...
+  }
+}
+```
+
+### Вызывающая сторона: StreamRpcClient + CreateProxy
+
+```csharp
+var options = new StreamingOptions { DefaultCommandTimeoutSeconds = 10 };
+
+// Создаём RPC-клиент, передавая функцию отправки
+var rpcClient = new StreamRpcClient(
+    sendFunc: async (envelope, ct) =>
+    {
+        await connection.SendAsync(new MyStreamMessage { Request = envelope }, ct);
+    },
+    options,
+    logger);
+
+// Получаем типизированный прокси
+var rpc = rpcClient.CreateProxy<IBattleServerRpc>();
+
+// Вызываем как обычные async-методы
+var room = await rpc.CreateRoom(new CreateRoom { Name = "Arena" }, ct);
+await rpc.DeleteRoom(new DeleteRoom { RoomId = room.RoomId }, ct);
+```
+
+В цикле получения сообщений передавайте ответы обратно в клиент:
+
+```csharp
 if (msg.Response != null)
-    serverRpcClient.TryComplete(msg.Response);
+    rpcClient.TryComplete(msg.Response);
+```
 
-// Server calls client:
+**Жизненный цикл:** один `StreamRpcClient` на одно соединение. При обрыве — `Dispose()` (все pending вызовы отменятся), при переподключении — новый экземпляр.
+
+| Метод | Описание |
+|-------|----------|
+| `CreateProxy<T>()` | Создаёт `DispatchProxy`, реализующий интерфейс `T` |
+| `TryComplete(ResponseEnvelope)` | Сопоставляет ответ с ожидающим вызовом по `InReplyToRequestId`. Возвращает `false` если вызов не найден |
+| `CancelAll()` | Отменяет все ожидающие вызовы |
+| `Dispose()` | `CancelAll()` + запрет новых вызовов |
+
+### Принимающая сторона: StreamRpcDispatcher
+
+Реализуйте интерфейс:
+
+```csharp
+public class BattleServerRpcHandler : IBattleServerRpc
+{
+    private readonly RoomService _rooms;
+
+    public async Task<RoomCreated> CreateRoom(CreateRoom request, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(request.Name))
+            throw new StreamRpcException(StatusCode.InvalidArgument, "Room name is required");
+
+        if (!await _rooms.HasCapacityAsync(ct))
+            throw new StreamRpcException(StatusCode.ResourceExhausted, "No capacity");
+
+        var room = await _rooms.CreateAsync(request.Name, ct);
+        return new RoomCreated { RoomId = room.Id };
+    }
+
+    public async Task<RoomInfo> GetRoom(GetRoomRequest request, CancellationToken ct)
+    {
+        var room = await _rooms.FindAsync(request.RoomId, ct)
+            ?? throw new StreamRpcException(StatusCode.NotFound, "Room not found");
+        return new RoomInfo { Name = room.Name };
+    }
+
+    public async Task DeleteRoom(DeleteRoom request, CancellationToken ct)
+    {
+        await _rooms.DeleteAsync(request.RoomId, ct);
+        // Для void-методов достаточно вернуть Task — клиент получит status OK
+    }
+
+    public Task<PingResult> Ping(PingRequest request)
+    {
+        return Task.FromResult(new PingResult { Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
+    }
+}
+```
+
+Создайте диспетчер и маршрутизируйте входящие запросы:
+
+```csharp
+var dispatcher = StreamRpcDispatcher.Create<IBattleServerRpc>(
+    handler: new BattleServerRpcHandler(),
+    sendFunc: async (envelope, ct) =>
+    {
+        await connection.SendAsync(new MyStreamMessage { Response = envelope }, ct);
+    },
+    logger);
+
+// В цикле получения сообщений:
+if (msg.Request != null)
+    await dispatcher.DispatchAsync(msg.Request, ct);
+```
+
+`Create<T>()` при вызове:
+1. Сканирует все методы интерфейса
+2. Валидирует сигнатуры (fail-fast при ошибках)
+3. Строит маппинг `TypeUrl → обработчик` через protobuf-дескрипторы
+4. Бросает `ArgumentException` при невалидном контракте (не-IMessage параметр, метод без параметров, неправильный return type)
+
+### Обработка ошибок
+
+**На стороне обработчика:**
+
+| Что бросает handler | ResponseEnvelope.Status | ResponseEnvelope.Error |
+|---------------------|------------------------|----------------------|
+| Возврат результата | `OK (0)` | — |
+| `StreamRpcException(NotFound, "...")` | `NotFound (5)` | Текст из исключения |
+| `StreamRpcException(ResourceExhausted, "...")` | `ResourceExhausted (8)` | Текст из исключения |
+| `InvalidOperationException("...")` | `Internal (13)` | Текст из исключения |
+| Любой другой `Exception` | `Internal (13)` | `ex.Message` |
+
+**На стороне диспетчера (до вызова handler):**
+
+| Ситуация | StatusCode |
+|----------|-----------|
+| `TypeUrl` не найден в маппинге | `Unimplemented (12)` |
+| Не удалось распарсить payload | `InvalidArgument (3)` |
+| Payload is null | `InvalidArgument (3)` |
+
+**На стороне вызывающего:**
+
+| Сценарий | Исключение |
+|----------|-----------|
+| Ответ с `status != OK` | `StreamRpcException` с соответствующим `StatusCode` |
+| Нет ответа в течение таймаута | `TimeoutException` |
+| Вызов отменён через `CancellationToken` | `OperationCanceledException` |
+| Клиент disposed / `CancelAll()` | `OperationCanceledException` |
+| Вызов после `Dispose()` | `ObjectDisposedException` |
+
+```csharp
+try
+{
+    var result = await rpc.CreateRoom(new CreateRoom { Name = "Arena" }, ct);
+}
+catch (StreamRpcException ex) when (ex.StatusCode == StatusCode.ResourceExhausted)
+{
+    logger.LogWarning("Сервер перегружен: {Error}", ex.Message);
+}
+catch (StreamRpcException ex)
+{
+    logger.LogError("RPC ошибка {StatusCode}: {Error}", ex.StatusCode, ex.Message);
+}
+catch (TimeoutException)
+{
+    logger.LogError("RPC вызов не дождался ответа");
+}
+```
+
+### Двунаправленный RPC
+
+Обе стороны могут одновременно быть и вызывающей, и принимающей. Создайте `StreamRpcClient` + `StreamRpcDispatcher` на каждой стороне с разными интерфейсами:
+
+```csharp
+// Контракты
+public interface IClientToServerRpc { ... }  // клиент вызывает, сервер обрабатывает
+public interface IServerToClientRpc { ... }  // сервер вызывает, клиент обрабатывает
+
+// На сервере:
+var dispatcher = StreamRpcDispatcher.Create<IClientToServerRpc>(serverHandler, sendResponse);
+var rpcClient = new StreamRpcClient(sendRequest, options);
+var clientProxy = rpcClient.CreateProxy<IServerToClientRpc>();
+
+// Маршрутизация входящих:
+if (msg.Request != null)
+    await dispatcher.DispatchAsync(msg.Request, ct);  // запрос от клиента
+if (msg.Response != null)
+    rpcClient.TryComplete(msg.Response);               // ответ клиента на наш запрос
+
+// Вызов клиента с сервера:
 await clientProxy.SyncWorldState(new WorldState { ... }, ct);
 ```
 
 ---
 
-## Error Handling Summary
+## Полный пример: ReconnectingStreamClient + RPC
 
-| Scenario | Exception on caller side |
-|----------|------------------------|
-| Handler returns OK | — (success) |
-| Handler throws `StreamRpcException(NotFound, ...)` | `StreamRpcException` with `StatusCode.NotFound` |
-| Handler throws `InvalidOperationException` | `StreamRpcException` with `StatusCode.Internal` |
-| No response within timeout | `TimeoutException` |
-| Caller cancels via `CancellationToken` | `OperationCanceledException` |
-| Client disposed / `CancelAll()` | `OperationCanceledException` |
-| Client disposed before call | `ObjectDisposedException` |
-| Unknown `TypeUrl` on server | `StreamRpcException` with `StatusCode.Unimplemented` |
+Клиент, который автоматически переподключается и предоставляет typed RPC:
+
+```csharp
+public class BattleStreamClient : ReconnectingStreamClient<BattleClientConnection, ServerMessage, ClientMessage>
+{
+    private readonly BattleService.BattleServiceClient _grpcClient;
+    private readonly StreamingOptions _options;
+    private StreamRpcClient? _rpcClient;
+
+    public IBattleServerRpc? Rpc { get; private set; }
+
+    public BattleStreamClient(
+        BattleService.BattleServiceClient grpcClient,
+        StreamKeepAliveMonitor monitor,
+        StreamingOptions options,
+        TimeProvider timeProvider,
+        ILogger<BattleStreamClient> logger)
+        : base(monitor, options, timeProvider, logger)
+    {
+        _grpcClient = grpcClient;
+        _options = options;
+    }
+
+    protected override string ClientName => "BattleStreamClient";
+
+    protected override AsyncDuplexStreamingCall<ClientMessage, ServerMessage> CreateStream(
+        CancellationToken ct)
+        => _grpcClient.GameStream(cancellationToken: ct);
+
+    protected override BattleClientConnection CreateConnection(
+        AsyncDuplexStreamingCall<ClientMessage, ServerMessage> stream)
+    {
+        _rpcClient?.Dispose();
+        _rpcClient = new StreamRpcClient(
+            async (env, ct) => await SendAsync(new ClientMessage { Request = env }, ct),
+            _options, Logger);
+        Rpc = _rpcClient.CreateProxy<IBattleServerRpc>();
+
+        return new BattleClientConnection(stream, _options, TimeProvider, Logger,
+            msg =>
+            {
+                if (msg.Response != null)
+                    _rpcClient.TryComplete(msg.Response);
+            });
+    }
+
+    public override async ValueTask DisposeAsync()
+    {
+        _rpcClient?.Dispose();
+        await base.DisposeAsync();
+    }
+}
+```
+
+Использование:
+
+```csharp
+// DI
+services.AddStreaming(configuration);
+services.AddSingleton<BattleStreamClient>();
+services.AddHostedService(sp => sp.GetRequiredService<BattleStreamClient>());
+
+// В коде
+var room = await battleClient.Rpc!.CreateRoom(new CreateRoom { Name = "Arena" }, ct);
+```
 
 ---
 
-## Project Structure
+## Структура проекта
 
 ```
 src/GrpcStreamingUtils/
-├── Proto/streaming_rpc.proto         # RequestEnvelope, ResponseEnvelope
-├── Rpc/
-│   ├── StreamRpcClient.cs            # Request/response correlation
-│   ├── StreamRpcProxy.cs             # DispatchProxy for typed calls
-│   ├── StreamRpcDispatcher.cs        # Auto-dispatch to handler methods
-│   └── StreamRpcException.cs         # Typed error with StatusCode
 ├── Connection/
-│   ├── IStreamConnection.cs          # Connection interface
-│   ├── StreamConnectionBase.cs       # Abstract base with keep-alive
-│   ├── ClientStreamConnection.cs     # Client-side duplex stream
-│   ├── ServerStreamConnection.cs     # Server-side stream within gRPC call
-│   ├── CloseReason.cs                # Normal / Timeout / Error
-│   └── StreamConnectionClosedArgs.cs # Close event args
+│   ├── IStreamConnection.cs          — интерфейс соединения
+│   ├── StreamConnectionBase.cs       — абстрактная база с keep-alive и write lock
+│   ├── ClientStreamConnection.cs     — клиентская обёртка над AsyncDuplexStreamingCall
+│   ├── ServerStreamConnection.cs     — серверная обёртка над IAsyncStreamReader/Writer
+│   ├── CloseReason.cs                — Normal / Timeout / Error
+│   └── StreamConnectionClosedArgs.cs — аргументы события закрытия
 ├── Client/
-│   └── ReconnectingStreamClient.cs   # BackgroundService with auto-reconnect
+│   └── ReconnectingStreamClient.cs   — BackgroundService с auto-reconnect
 ├── KeepAlive/
-│   ├── StreamKeepAliveMonitor.cs     # Background ping/timeout monitor
-│   └── StreamKeepAliveManager.cs     # Per-connection keep-alive state
+│   ├── StreamKeepAliveMonitor.cs     — фоновый мониторинг всех соединений
+│   └── StreamKeepAliveManager.cs     — per-connection keep-alive состояние
+├── Rpc/
+│   ├── StreamRpcClient.cs            — корреляция запрос/ответ
+│   ├── StreamRpcProxy.cs             — DispatchProxy для typed вызовов
+│   ├── StreamRpcDispatcher.cs        — автодиспетчер входящих запросов
+│   └── StreamRpcException.cs         — ошибка с gRPC StatusCode
 ├── Configuration/
-│   └── StreamingOptions.cs           # All configurable timeouts
+│   └── StreamingOptions.cs           — все таймауты и настройки
 ├── Exceptions/
 │   └── StreamNotEstablishedException.cs
-└── Extensions/
-    └── ServiceCollectionExtensions.cs # AddStreaming() DI registration
+├── Extensions/
+│   └── ServiceCollectionExtensions.cs — AddStreaming()
+└── Proto/
+    └── streaming_rpc.proto           — RequestEnvelope, ResponseEnvelope
 ```
 
-## Requirements
+## Требования
 
 - .NET 8.0+
 - Google.Protobuf 3.29.6+
 - Grpc.AspNetCore 2.70.0+
 
-## License
+## Лицензия
 
 MIT
