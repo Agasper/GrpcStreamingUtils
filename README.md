@@ -317,7 +317,8 @@ builder.Services.AddStreaming(builder.Configuration);
     "IdleTimeoutSeconds": 30,
     "PingIntervalSeconds": 10,
     "InitialReconnectIntervalSeconds": 1,
-    "MaxReconnectIntervalSeconds": 60
+    "MaxReconnectIntervalSeconds": 60,
+    "ReconnectBackoffMultiplier": 2
   }
 }
 ```
@@ -329,6 +330,7 @@ builder.Services.AddStreaming(builder.Configuration);
 | `PingIntervalSeconds` | 10 | — | Интервал отправки ping |
 | `InitialReconnectIntervalSeconds` | 1 | 1–300 | Первая задержка перед реконнектом |
 | `MaxReconnectIntervalSeconds` | 60 | 1–3600 | Максимальная задержка после backoff |
+| `ReconnectBackoffMultiplier` | 2 | 1–10 | Множитель задержки при каждом следующем реконнекте |
 
 ---
 

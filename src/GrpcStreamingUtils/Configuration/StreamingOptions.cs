@@ -17,4 +17,7 @@ public class StreamingOptions
 
     [Range(1, 3600)]
     public int MaxReconnectIntervalSeconds { get; set; } = 60;
+
+    [Range(1, 10)]
+    public double ReconnectBackoffMultiplier { get; set; } = 2;
 }

@@ -124,7 +124,7 @@ public abstract class ReconnectingStreamClient<TConnection, TIncoming, TOutgoing
         else
         {
             _currentBackoffSeconds = Math.Min(
-                _currentBackoffSeconds * 2,
+                (int)(_currentBackoffSeconds * _streamingOptions.ReconnectBackoffMultiplier),
                 _streamingOptions.MaxReconnectIntervalSeconds);
         }
 
