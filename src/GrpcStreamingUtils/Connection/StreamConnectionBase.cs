@@ -20,8 +20,8 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
     where TIncoming : class
     where TOutgoing : class
 {
-    private readonly object _closedEventLock = new();
-    private bool _closedEventFired;
+    private readonly object _closeLock = new();
+    private bool _closed;
 
     protected readonly ILogger _logger;
     private readonly CancellationTokenSource _connectionCts;
@@ -32,14 +32,14 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
 
     protected StreamConnectionBase(
         TimeProvider timeProvider,
-        CancellationTokenSource connectionCts,
+        CancellationToken externalCancellation,
         ILogger logger,
         TimeSpan? pingInterval = null,
         TimeSpan? idleTimeout = null)
         : base(Guid.NewGuid())
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _connectionCts = connectionCts ?? throw new ArgumentNullException(nameof(connectionCts));
+        _connectionCts = CancellationTokenSource.CreateLinkedTokenSource(externalCancellation);
 
         KeepAliveManager = new StreamKeepAliveManager(
             ConnectionId,
@@ -76,19 +76,19 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
                 await OnMessageReceivedAsync(message, linkedToken).ConfigureAwait(false);
             }
 
-            FireClosed(CloseReason.Normal);
+            await CloseAsync(CloseReason.Normal).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
-            FireClosed(CloseReason.Normal);
+            await CloseAsync(CloseReason.Normal).ConfigureAwait(false);
         }
         catch (RpcException ex) when (ex.StatusCode == StatusCode.Cancelled)
         {
-            FireClosed(CloseReason.Normal);
+            await CloseAsync(CloseReason.Normal).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            FireClosed(CloseReason.Error, ex);
+            await CloseAsync(CloseReason.Error, ex).ConfigureAwait(false);
         }
     }
 
@@ -111,53 +111,20 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
         }
     }
 
-    public async Task CloseAsync(CancellationToken cancellationToken)
+    public Task CloseAsync(CancellationToken cancellationToken)
+        => CloseAsync(CloseReason.Normal);
+
+    private async Task CloseAsync(CloseReason reason, Exception? exception = null)
     {
+        lock (_closeLock)
+        {
+            if (_closed) return;
+            _closed = true;
+        }
+
+        IsClosed = true;
+
         await OnCloseAsync().ConfigureAwait(false);
-
-        if (!_connectionCts.IsCancellationRequested)
-        {
-            _connectionCts.Cancel();
-        }
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        if (_disposed) return;
-        _disposed = true;
-        IsClosed = true;
-
-        if (!_connectionCts.IsCancellationRequested)
-        {
-            _connectionCts.Cancel();
-        }
-
-        KeepAliveManager.Dispose();
-        _connectionCts.Dispose();
-
-        await OnDisposeAsync().ConfigureAwait(false);
-
-        try
-        {
-            await _writeLock.WaitAsync().ConfigureAwait(false);
-            _writeLock.Release();
-        }
-        catch (ObjectDisposedException)
-        {
-        }
-
-        _writeLock.Dispose();
-    }
-
-    private void FireClosed(CloseReason reason, Exception? exception = null)
-    {
-        lock (_closedEventLock)
-        {
-            if (_closedEventFired) return;
-            _closedEventFired = true;
-        }
-
-        IsClosed = true;
 
         if (!_connectionCts.IsCancellationRequested)
         {
@@ -175,5 +142,29 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
                 _logger.LogWarning(ex, "Error in OnConnectionClosed handler");
             }
         }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_disposed) return;
+        _disposed = true;
+
+        await CloseAsync(CancellationToken.None).ConfigureAwait(false);
+
+        KeepAliveManager.Dispose();
+        _connectionCts.Dispose();
+
+        await OnDisposeAsync().ConfigureAwait(false);
+
+        try
+        {
+            await _writeLock.WaitAsync().ConfigureAwait(false);
+            _writeLock.Release();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+
+        _writeLock.Dispose();
     }
 }

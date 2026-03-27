@@ -18,8 +18,7 @@ public abstract class ServerStreamConnection<TIncoming, TOutgoing> : StreamConne
         ILogger logger,
         TimeSpan? pingInterval = null,
         TimeSpan? idleTimeout = null)
-        : base(timeProvider,
-            CancellationTokenSource.CreateLinkedTokenSource(grpcCallCancellation), logger, pingInterval, idleTimeout)
+        : base(timeProvider, grpcCallCancellation, logger, pingInterval, idleTimeout)
     {
         _requestStream = requestStream ?? throw new ArgumentNullException(nameof(requestStream));
         _responseStream = responseStream ?? throw new ArgumentNullException(nameof(responseStream));
