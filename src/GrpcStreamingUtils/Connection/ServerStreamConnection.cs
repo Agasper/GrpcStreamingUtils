@@ -28,7 +28,7 @@ public abstract class ServerStreamConnection<TIncoming, TOutgoing> : StreamConne
 
     private protected override Task WriteMessageAsync(TOutgoing message) => _responseStream.WriteAsync(message);
 
-    private protected override Task OnCloseAsync() => Task.CompletedTask;
+    private protected override Task OnCloseAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
     protected override Task OnDisposeAsync() => Task.CompletedTask;
 }

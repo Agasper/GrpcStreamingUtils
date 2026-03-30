@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Reflection;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
@@ -51,13 +50,22 @@ public sealed class StreamRpcDispatcher
                 throw new ArgumentException($"First parameter of '{method.Name}' must implement IMessage.");
 
             var returnType = method.ReturnType;
+            if (returnType == typeof(ValueTask) || (returnType.IsGenericType && returnType.GetGenericTypeDefinition() == typeof(ValueTask<>)))
+                throw new ArgumentException($"Method '{method.Name}' returns ValueTask which is not supported. Use Task or Task<T> instead.");
             if (returnType != typeof(Task) && !(returnType.IsGenericType && returnType.GetGenericTypeDefinition() == typeof(Task<>)))
                 throw new ArgumentException($"Method '{method.Name}' must return Task or Task<T>.");
 
-            // Instantiate request type to get its descriptor for typeUrl
+            for (int i = 1; i < parameters.Length; i++)
+            {
+                if (parameters[i].ParameterType == typeof(CancellationToken))
+                    continue;
+                if (!parameters[i].HasDefaultValue)
+                    throw new ArgumentException(
+                        $"Parameter '{parameters[i].Name}' of method '{method.Name}' must have a default value or be CancellationToken.");
+            }
+
             var requestInstance = (IMessage)Activator.CreateInstance(requestParamType)!;
-            var typeUrl = Any.GetTypeName(Google.Protobuf.WellKnownTypes.Any.Pack(requestInstance).TypeUrl);
-            var fullTypeUrl = Google.Protobuf.WellKnownTypes.Any.Pack(requestInstance).TypeUrl;
+            var fullTypeUrl = "type.googleapis.com/" + requestInstance.Descriptor.FullName;
             var parser = requestInstance.Descriptor.Parser;
 
             bool hasResponse = returnType.IsGenericType && returnType.GetGenericTypeDefinition() == typeof(Task<>);
@@ -66,12 +74,13 @@ public sealed class StreamRpcDispatcher
             if (hasResponse)
             {
                 var resultType = returnType.GetGenericArguments()[0];
-                var resultProperty = typeof(Task<>).MakeGenericType(resultType).GetProperty("Result")!;
-                resultExtractor = task => resultProperty.GetValue(task);
+                resultExtractor = CreateResultExtractor(resultType);
             }
 
-            var entry = new MethodEntry(method, parser, hasResponse, resultExtractor);
-            methods[fullTypeUrl] = entry;
+            var entry = new MethodEntry(method, parameters, parser, hasResponse, resultExtractor);
+            if (!methods.TryAdd(fullTypeUrl, entry))
+                throw new ArgumentException(
+                    $"Duplicate request type '{requestParamType.Name}': methods '{methods[fullTypeUrl].Method.Name}' and '{method.Name}' both handle the same type.");
         }
 
         return new StreamRpcDispatcher(methods, handler, sendFunc, logger);
@@ -86,39 +95,38 @@ public sealed class StreamRpcDispatcher
             InReplyToRequestId = request.RequestId
         };
 
+        if (request.Payload == null)
+        {
+            response.Status = (int)StatusCode.InvalidArgument;
+            response.Error = "Request payload is null.";
+            await _sendFunc(response, ct).ConfigureAwait(false);
+            return;
+        }
+
+        if (!_methods.TryGetValue(request.Payload.TypeUrl, out var entry))
+        {
+            response.Status = (int)StatusCode.Unimplemented;
+            response.Error = $"No handler for '{request.Payload.TypeUrl}'.";
+            await _sendFunc(response, ct).ConfigureAwait(false);
+            return;
+        }
+
+        IMessage requestMessage;
         try
         {
-            if (request.Payload == null)
-            {
-                response.Status = (int)StatusCode.InvalidArgument;
-                response.Error = "Request payload is null.";
-                await _sendFunc(response, ct).ConfigureAwait(false);
-                return;
-            }
+            requestMessage = entry.RequestParser.ParseFrom(request.Payload.Value);
+        }
+        catch (Exception ex)
+        {
+            response.Status = (int)StatusCode.InvalidArgument;
+            response.Error = $"Failed to parse payload: {ex.Message}";
+            await _sendFunc(response, ct).ConfigureAwait(false);
+            return;
+        }
 
-            if (!_methods.TryGetValue(request.Payload.TypeUrl, out var entry))
-            {
-                response.Status = (int)StatusCode.Unimplemented;
-                response.Error = $"No handler for '{request.Payload.TypeUrl}'.";
-                await _sendFunc(response, ct).ConfigureAwait(false);
-                return;
-            }
-
-            IMessage requestMessage;
-            try
-            {
-                requestMessage = entry.RequestParser.ParseFrom(request.Payload.Value);
-            }
-            catch (Exception ex)
-            {
-                response.Status = (int)StatusCode.InvalidArgument;
-                response.Error = $"Failed to parse payload: {ex.Message}";
-                await _sendFunc(response, ct).ConfigureAwait(false);
-                return;
-            }
-
-            // Build arguments: (IMessage request, CancellationToken ct)
-            var methodParams = entry.Method.GetParameters();
+        try
+        {
+            var methodParams = entry.Parameters;
             var args = new object?[methodParams.Length];
             args[0] = requestMessage;
             for (int i = 1; i < methodParams.Length; i++)
@@ -174,8 +182,19 @@ public sealed class StreamRpcDispatcher
         }
     }
 
+    private static Func<Task, object?> CreateResultExtractor(System.Type resultType)
+    {
+        var method = typeof(StreamRpcDispatcher)
+            .GetMethod(nameof(ExtractResult), BindingFlags.NonPublic | BindingFlags.Static)!
+            .MakeGenericMethod(resultType);
+        return (Func<Task, object?>)Delegate.CreateDelegate(typeof(Func<Task, object?>), method);
+    }
+
+    private static object? ExtractResult<T>(Task task) => ((Task<T>)task).Result;
+
     private sealed record MethodEntry(
         MethodInfo Method,
+        ParameterInfo[] Parameters,
         MessageParser RequestParser,
         bool HasResponse,
         Func<Task, object?>? ResultExtractor);

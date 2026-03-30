@@ -12,10 +12,9 @@ internal sealed class StreamKeepAliveManager : IDisposable
     private readonly TimeProvider _timeProvider;
     private readonly ILogger _logger;
     private readonly object _lock = new();
-    private readonly object _disposeLock = new();
     private DateTimeOffset _lastMessageReceivedAt;
     private DateTimeOffset _lastPingSentAt;
-    private bool _disposed;
+    private volatile bool _disposed;
 
     public StreamKeepAliveManager(
         Guid connectionId,
@@ -53,6 +52,8 @@ internal sealed class StreamKeepAliveManager : IDisposable
 
         bool shouldSendPing = false;
         bool shouldTimeout = false;
+        int idleSeconds = 0;
+        int timeoutSeconds = 0;
         var now = _timeProvider.GetUtcNow();
 
         lock (_lock)
@@ -65,7 +66,6 @@ internal sealed class StreamKeepAliveManager : IDisposable
                 if (timeSinceLastPing >= _pingInterval.Value)
                 {
                     shouldSendPing = true;
-                    _lastPingSentAt = now;
                 }
             }
 
@@ -75,46 +75,53 @@ internal sealed class StreamKeepAliveManager : IDisposable
 
                 if (idleTime > _idleTimeout.Value)
                 {
-                    using (_logger.BeginScope(new Dictionary<string, object> { ["ConnectionId"] = _connectionId.ToString() }))
-                    {
-                        _logger.LogWarning(
-                            "Stream connection {connectionId} timed out: no messages received for {idleSeconds}s (timeout: {timeoutSeconds}s)",
-                            _connectionId,
-                            (int)idleTime.TotalSeconds,
-                            (int)_idleTimeout.Value.TotalSeconds);
-                    }
-
                     shouldTimeout = true;
+                    idleSeconds = (int)idleTime.TotalSeconds;
+                    timeoutSeconds = (int)_idleTimeout.Value.TotalSeconds;
                 }
             }
         }
 
-        if (shouldSendPing)
+        if (shouldSendPing && !shouldTimeout)
         {
             try
             {
                 await _sendPingFunc!(cancellationToken).ConfigureAwait(false);
+
+                lock (_lock)
+                {
+                    _lastPingSentAt = _timeProvider.GetUtcNow();
+                }
             }
             catch (Exception ex)
             {
-                using (_logger.BeginScope(new Dictionary<string, object> { ["ConnectionId"] = _connectionId.ToString() }))
+                using (_logger.BeginConnectionScope(_connectionId))
                 {
-                    _logger.LogWarning(ex, "Failed to send Ping message for connection {connectionId}", _connectionId);
+                    _logger.LogWarning(ex, "Failed to send Ping, closing connection");
                 }
+
+                _onTimeoutAction();
             }
         }
 
         if (shouldTimeout)
         {
+            using (_logger.BeginConnectionScope(_connectionId))
+            {
+                _logger.LogWarning(
+                    "Stream connection timed out: no messages received for {idleSeconds}s (timeout: {timeoutSeconds}s)",
+                    idleSeconds,
+                    timeoutSeconds);
+            }
+
             _onTimeoutAction();
         }
     }
 
     public void Dispose()
     {
-        lock (_disposeLock)
+        lock (_lock)
         {
-            if (_disposed) return;
             _disposed = true;
         }
     }

@@ -181,6 +181,118 @@ public class StreamRpcDispatcherTests
                 new BadRpcHandler(),
                 async (env, ct) => { }));
     }
+
+    [Fact]
+    public async Task DispatchAsync_NullPayload_ReturnsInvalidArgument()
+    {
+        ResponseEnvelope? captured = null;
+        var handler = new TestRpcHandler();
+        var dispatcher = StreamRpcDispatcher.Create<ITestRpc>(
+            handler,
+            async (env, ct) => { captured = env; });
+
+        var request = new RequestEnvelope
+        {
+            RequestId = "req-null",
+            Payload = null
+        };
+
+        await dispatcher.DispatchAsync(request, CancellationToken.None);
+
+        Assert.NotNull(captured);
+        Assert.Equal((int)StatusCode.InvalidArgument, captured!.Status);
+        Assert.Contains("null", captured.Error);
+    }
+
+    [Fact]
+    public async Task DispatchAsync_InvalidPayloadData_ReturnsInvalidArgument()
+    {
+        ResponseEnvelope? captured = null;
+        var handler = new TestRpcHandler();
+        var dispatcher = StreamRpcDispatcher.Create<ITestRpc>(
+            handler,
+            async (env, ct) => { captured = env; });
+
+        var request = new RequestEnvelope
+        {
+            RequestId = "req-bad-parse",
+            Payload = new Any
+            {
+                TypeUrl = Any.Pack(new TestRequest()).TypeUrl,
+                Value = Google.Protobuf.ByteString.CopyFrom(new byte[] { 0xFF, 0xFF, 0xFF })
+            }
+        };
+
+        await dispatcher.DispatchAsync(request, CancellationToken.None);
+
+        Assert.NotNull(captured);
+        Assert.Equal((int)StatusCode.InvalidArgument, captured!.Status);
+        Assert.Contains("parse", captured.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Create_ParameterWithoutDefaultValue_ThrowsException()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            StreamRpcDispatcher.Create<IBadRpcRequiredParam>(
+                new BadRpcRequiredParamHandler(),
+                async (env, ct) => { }));
+    }
+
+    [Fact]
+    public void Create_DuplicateRequestType_ThrowsException()
+    {
+        var ex = Assert.Throws<ArgumentException>(() =>
+            StreamRpcDispatcher.Create<IDuplicateRequestRpc>(
+                new DuplicateRequestRpcHandler(),
+                async (env, ct) => { }));
+
+        Assert.Contains("Duplicate request type", ex.Message);
+        Assert.Contains("TestRequest", ex.Message);
+    }
+
+    [Fact]
+    public async Task DispatchAsync_ForwardsCancellationToken_ToHandler()
+    {
+        using var cts = new CancellationTokenSource();
+        CancellationToken? receivedCt = null;
+        var handler = new TestRpcHandler
+        {
+            EchoHandler = (req, ct) =>
+            {
+                receivedCt = ct;
+                return Task.FromResult(new TestResponse { Result = "ok" });
+            }
+        };
+        var dispatcher = StreamRpcDispatcher.Create<ITestRpc>(
+            handler,
+            async (env, ct) => { });
+
+        var request = new RequestEnvelope
+        {
+            RequestId = "req-ct",
+            Payload = Any.Pack(new TestRequest { Value = "test" })
+        };
+
+        await dispatcher.DispatchAsync(request, cts.Token);
+
+        Assert.NotNull(receivedCt);
+        Assert.Equal(cts.Token, receivedCt!.Value);
+    }
+}
+
+public interface IDuplicateRequestRpc
+{
+    Task<TestResponse> Method1(TestRequest request, CancellationToken ct = default);
+    Task<TestResponse> Method2(TestRequest request, CancellationToken ct = default);
+}
+
+public class DuplicateRequestRpcHandler : IDuplicateRequestRpc
+{
+    public Task<TestResponse> Method1(TestRequest request, CancellationToken ct = default)
+        => Task.FromResult(new TestResponse { Result = "1" });
+    public Task<TestResponse> Method2(TestRequest request, CancellationToken ct = default)
+        => Task.FromResult(new TestResponse { Result = "2" });
 }
 
 public interface IBadRpc
@@ -191,4 +303,14 @@ public interface IBadRpc
 public class BadRpcHandler : IBadRpc
 {
     public Task DoSomething(string notAMessage, CancellationToken ct = default) => Task.CompletedTask;
+}
+
+public interface IBadRpcRequiredParam
+{
+    Task DoSomething(TestRequest request, int requiredParam);
+}
+
+public class BadRpcRequiredParamHandler : IBadRpcRequiredParam
+{
+    public Task DoSomething(TestRequest request, int requiredParam) => Task.CompletedTask;
 }

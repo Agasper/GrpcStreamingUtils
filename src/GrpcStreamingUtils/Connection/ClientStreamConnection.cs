@@ -24,7 +24,7 @@ public abstract class ClientStreamConnection<TIncoming, TOutgoing> : StreamConne
 
     private protected override Task WriteMessageAsync(TOutgoing message) => _stream.RequestStream.WriteAsync(message);
 
-    private protected override async Task OnCloseAsync()
+    private protected override async Task OnCloseAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -32,7 +32,7 @@ public abstract class ClientStreamConnection<TIncoming, TOutgoing> : StreamConne
         }
         catch (Exception ex)
         {
-            using (_logger.BeginScope(new Dictionary<string, object> { ["ConnectionId"] = ConnectionId.ToString() }))
+            using (_logger.BeginConnectionScope(ConnectionId))
             {
                 _logger.LogWarning(ex, "Error completing request stream");
             }

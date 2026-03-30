@@ -7,8 +7,11 @@ namespace Niarru.GrpcStreamingUtils.Connection;
 public abstract class StreamConnectionBase
 {
     public Guid ConnectionId { get; }
-    internal StreamKeepAliveManager KeepAliveManager { get; private protected set; } = null!;
-    internal bool IsClosed { get; private protected set; }
+    internal StreamKeepAliveManager? KeepAliveManager { get; private protected set; }
+
+    private int _isClosed;
+    internal bool IsClosed => Volatile.Read(ref _isClosed) != 0;
+    private protected void MarkClosed() => Volatile.Write(ref _isClosed, 1);
 
     protected StreamConnectionBase(Guid connectionId)
     {
@@ -21,12 +24,13 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
     where TOutgoing : class
 {
     private readonly object _closeLock = new();
-    private bool _closed;
+    private Task? _closeTask;
+    private volatile bool _timedOut;
 
     protected readonly ILogger _logger;
     private readonly CancellationTokenSource _connectionCts;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
-    private bool _disposed;
+    private int _disposed;
 
     public CancellationToken ConnectionClosed => _connectionCts.Token;
 
@@ -41,19 +45,26 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _connectionCts = CancellationTokenSource.CreateLinkedTokenSource(externalCancellation);
 
-        KeepAliveManager = new StreamKeepAliveManager(
-            ConnectionId,
-            pingInterval.HasValue ? async ct => await SendAsync(CreatePingMessage(), ct).ConfigureAwait(false) : null,
-            () => _connectionCts.Cancel(),
-            pingInterval,
-            idleTimeout,
-            timeProvider ?? throw new ArgumentNullException(nameof(timeProvider)),
-            logger);
+        if (pingInterval.HasValue || idleTimeout.HasValue)
+        {
+            KeepAliveManager = new StreamKeepAliveManager(
+                ConnectionId,
+                pingInterval.HasValue ? async ct => await SendAsync(CreatePingMessage(), ct).ConfigureAwait(false) : null,
+                () =>
+                {
+                    _timedOut = true;
+                    _connectionCts.Cancel();
+                },
+                pingInterval,
+                idleTimeout,
+                timeProvider ?? throw new ArgumentNullException(nameof(timeProvider)),
+                logger);
+        }
     }
 
     private protected abstract IAsyncStreamReader<TIncoming> GetReader();
     private protected abstract Task WriteMessageAsync(TOutgoing message);
-    private protected abstract Task OnCloseAsync();
+    private protected abstract Task OnCloseAsync(CancellationToken cancellationToken);
     protected abstract Task OnDisposeAsync();
 
     protected abstract TOutgoing CreatePingMessage();
@@ -72,29 +83,29 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
         {
             await foreach (var message in GetReader().ReadAllAsync(linkedToken).ConfigureAwait(false))
             {
-                KeepAliveManager.UpdateLastMessageTime();
+                KeepAliveManager?.UpdateLastMessageTime();
                 await OnMessageReceivedAsync(message, linkedToken).ConfigureAwait(false);
             }
 
-            await CloseAsync(CloseReason.Normal).ConfigureAwait(false);
+            await CloseCoreAsync(CloseReason.Normal).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
-            await CloseAsync(CloseReason.Normal).ConfigureAwait(false);
+            await CloseCoreAsync(_timedOut ? CloseReason.Timeout : CloseReason.Normal).ConfigureAwait(false);
         }
         catch (RpcException ex) when (ex.StatusCode == StatusCode.Cancelled)
         {
-            await CloseAsync(CloseReason.Normal).ConfigureAwait(false);
+            await CloseCoreAsync(_timedOut ? CloseReason.Timeout : CloseReason.Normal).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            await CloseAsync(CloseReason.Error, ex).ConfigureAwait(false);
+            await CloseCoreAsync(CloseReason.Error, ex).ConfigureAwait(false);
         }
     }
 
     public async Task SendAsync(TOutgoing message, CancellationToken cancellationToken)
     {
-        if (_disposed || _connectionCts.IsCancellationRequested)
+        if (Volatile.Read(ref _disposed) != 0 || _connectionCts.IsCancellationRequested)
             throw new OperationCanceledException("Connection is closed.");
 
         await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -112,19 +123,23 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
     }
 
     public Task CloseAsync(CancellationToken cancellationToken)
-        => CloseAsync(CloseReason.Normal);
+        => CloseCoreAsync(CloseReason.Normal, cancellationToken: cancellationToken);
 
-    private async Task CloseAsync(CloseReason reason, Exception? exception = null)
+    private Task CloseCoreAsync(CloseReason reason, Exception? exception = null, CancellationToken cancellationToken = default)
     {
         lock (_closeLock)
         {
-            if (_closed) return;
-            _closed = true;
+            if (_closeTask != null) return _closeTask;
+            _closeTask = ExecuteCloseAsync(reason, exception, cancellationToken);
+            return _closeTask;
         }
+    }
 
-        IsClosed = true;
+    private async Task ExecuteCloseAsync(CloseReason reason, Exception? exception, CancellationToken cancellationToken)
+    {
+        MarkClosed();
 
-        await OnCloseAsync().ConfigureAwait(false);
+        await OnCloseAsync(cancellationToken).ConfigureAwait(false);
 
         if (!_connectionCts.IsCancellationRequested)
         {
@@ -137,7 +152,7 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
         }
         catch (Exception ex)
         {
-            using (_logger.BeginScope(new Dictionary<string, object> { ["ConnectionId"] = ConnectionId.ToString() }))
+            using (_logger.BeginConnectionScope(ConnectionId))
             {
                 _logger.LogWarning(ex, "Error in OnConnectionClosed handler");
             }
@@ -146,13 +161,13 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
-        _disposed = true;
+        if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0) return;
 
-        await CloseAsync(CancellationToken.None).ConfigureAwait(false);
+        GC.SuppressFinalize(this);
 
-        KeepAliveManager.Dispose();
-        _connectionCts.Dispose();
+        await CloseCoreAsync(CloseReason.Normal).ConfigureAwait(false);
+
+        KeepAliveManager?.Dispose();
 
         await OnDisposeAsync().ConfigureAwait(false);
 
@@ -165,6 +180,7 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
         {
         }
 
+        _connectionCts.Dispose();
         _writeLock.Dispose();
     }
 }

@@ -18,13 +18,14 @@ public abstract class ReconnectingStreamClient<TConnection, TIncoming, TOutgoing
     private readonly double _reconnectBackoffMultiplier;
     private double _currentBackoffMs;
     private TConnection? _connection;
+    private int _asyncDisposed;
 
     protected TimeProvider TimeProvider { get; }
     protected ILogger Logger { get; }
 
-    protected TConnection? Connection => _connection;
+    protected TConnection? Connection => Volatile.Read(ref _connection);
 
-    protected bool IsConnected => _connection != null;
+    protected bool IsConnected => Volatile.Read(ref _connection) != null;
 
     protected ReconnectingStreamClient(
         StreamKeepAliveMonitor keepAliveMonitor,
@@ -69,13 +70,13 @@ public abstract class ReconnectingStreamClient<TConnection, TIncoming, TOutgoing
                     await SendHandshakeAsync(stream, stoppingToken).ConfigureAwait(false);
 
                     connection = CreateConnection(stream);
-                    _connection = connection;
+                    Volatile.Write(ref _connection, connection);
                     _keepAliveMonitor.Register(connection);
                     _currentBackoffMs = 0;
 
                     await connection.RunAsync(stoppingToken).ConfigureAwait(false);
                 }
-                catch (RpcException ex) when (ex.StatusCode == StatusCode.Cancelled)
+                catch (RpcException ex) when (ex.StatusCode == StatusCode.Cancelled && stoppingToken.IsCancellationRequested)
                 {
                     Logger.LogInformation("{ClientName} cancelled", ClientName);
                     break;
@@ -93,7 +94,7 @@ public abstract class ReconnectingStreamClient<TConnection, TIncoming, TOutgoing
                 {
                     if (connection != null)
                     {
-                        _connection = null;
+                        Volatile.Write(ref _connection, null);
                         _keepAliveMonitor.Unregister(connection);
                         await connection.DisposeAsync().ConfigureAwait(false);
                     }
@@ -111,7 +112,7 @@ public abstract class ReconnectingStreamClient<TConnection, TIncoming, TOutgoing
 
     protected async Task SendAsync(TOutgoing message, CancellationToken cancellationToken)
     {
-        var connection = _connection;
+        var connection = Volatile.Read(ref _connection);
         if (connection == null)
         {
             throw new StreamNotEstablishedException();
@@ -133,12 +134,13 @@ public abstract class ReconnectingStreamClient<TConnection, TIncoming, TOutgoing
                 _maxReconnectInterval.TotalMilliseconds);
         }
 
-        var delay = TimeSpan.FromMilliseconds(_currentBackoffMs);
+        var jitter = 0.75 + Random.Shared.NextDouble() * 0.5;
+        var delay = TimeSpan.FromMilliseconds(_currentBackoffMs * jitter);
         Logger.LogInformation("Reconnecting in {Delay:F1}s...", delay.TotalSeconds);
 
         try
         {
-            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            await Task.Delay(delay, TimeProvider, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -147,11 +149,17 @@ public abstract class ReconnectingStreamClient<TConnection, TIncoming, TOutgoing
 
     public virtual async ValueTask DisposeAsync()
     {
-        if (_connection != null)
+        if (Interlocked.CompareExchange(ref _asyncDisposed, 1, 0) != 0) return;
+
+        GC.SuppressFinalize(this);
+
+        try
         {
-            _keepAliveMonitor.Unregister(_connection);
-            await _connection.DisposeAsync().ConfigureAwait(false);
-            _connection = null;
+            await StopAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // StopAsync may throw if not started
         }
 
         base.Dispose();

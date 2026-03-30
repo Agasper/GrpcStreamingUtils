@@ -15,7 +15,7 @@ public sealed class StreamRpcClient : IDisposable
     private readonly Func<RequestEnvelope, CancellationToken, Task> _sendFunc;
     private readonly TimeSpan _defaultTimeout;
     private readonly ILogger? _logger;
-    private bool _disposed;
+    private int _disposed;
 
     public StreamRpcClient(
         Func<RequestEnvelope, CancellationToken, Task> sendFunc,
@@ -29,7 +29,7 @@ public sealed class StreamRpcClient : IDisposable
 
     public TInterface CreateProxy<TInterface>() where TInterface : class
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
 
         var proxy = DispatchProxy.Create<TInterface, StreamRpcProxy>();
         ((StreamRpcProxy)(object)proxy).Initialize(this);
@@ -73,14 +73,13 @@ public sealed class StreamRpcClient : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
+        if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0) return;
         CancelAll();
     }
 
     internal async Task<ResponseEnvelope> CallAsync(IMessage request, TimeSpan? timeout, CancellationToken ct)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
 
         var requestId = Guid.NewGuid().ToString();
         var envelope = new RequestEnvelope

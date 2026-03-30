@@ -185,7 +185,7 @@ Close reason, passed to `OnConnectionClosed`:
 | Value | When |
 |-------|------|
 | `Normal` | Stream completed normally, cancellation, or gRPC Cancelled |
-| `Timeout` | Not used directly (timeout is handled by keep-alive via cancel) |
+| `Timeout` | Keep-alive idle timeout exceeded — no messages received within the configured interval |
 | `Error` | Unhandled exception while reading the stream |
 
 ---
