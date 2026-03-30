@@ -69,8 +69,16 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
 
     protected abstract TOutgoing CreatePingMessage();
 
+    protected void ResetIdleTimer()
+    {
+        KeepAliveManager?.UpdateLastMessageTime();
+    }
+
     protected virtual Task OnMessageReceivedAsync(TIncoming message, CancellationToken cancellationToken)
-        => Task.CompletedTask;
+    {
+        ResetIdleTimer();
+        return Task.CompletedTask;
+    }
 
     protected virtual void OnConnectionClosed(StreamConnectionClosedArgs args) { }
 
@@ -83,7 +91,6 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
         {
             await foreach (var message in GetReader().ReadAllAsync(linkedToken).ConfigureAwait(false))
             {
-                KeepAliveManager?.UpdateLastMessageTime();
                 await OnMessageReceivedAsync(message, linkedToken).ConfigureAwait(false);
             }
 
@@ -103,7 +110,7 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
         }
     }
 
-    public async Task SendAsync(TOutgoing message, CancellationToken cancellationToken)
+    public virtual async Task SendAsync(TOutgoing message, CancellationToken cancellationToken)
     {
         if (Volatile.Read(ref _disposed) != 0 || _connectionCts.IsCancellationRequested)
             throw new OperationCanceledException("Connection is closed.");

@@ -220,6 +220,107 @@ public class StreamConnectionBaseTests
         await Assert.ThrowsAsync<OperationCanceledException>(() =>
             connection.SendAsync(new TestOutgoing { Data = "x" }, CancellationToken.None));
     }
+
+    [Fact]
+    public async Task IncomingMessage_ResetsIdleTimer_ByDefault()
+    {
+        var timeProvider = new FakeTimeProvider();
+        var messages = new[] { new TestIncoming { Data = "a" } };
+        var connection = new DefaultBehaviorConnection(
+            _logger, new InMemoryStreamReader<TestIncoming>(messages), timeProvider,
+            idleTimeout: TimeSpan.FromSeconds(10));
+
+        // Advance past half the timeout
+        timeProvider.Advance(TimeSpan.FromSeconds(8));
+
+        // RunAsync reads the message → OnMessageReceivedAsync base → ResetIdleTimer
+        await connection.RunAsync(CancellationToken.None);
+
+        // After message, timer was reset. Advance 8s again (total 8s since reset, < 10s timeout)
+        timeProvider.Advance(TimeSpan.FromSeconds(8));
+        await connection.KeepAliveManager!.Update(CancellationToken.None);
+
+        // Should NOT have timed out
+        Assert.Equal(CloseReason.Normal, connection.LastCloseReason);
+    }
+
+    [Fact]
+    public async Task IncomingMessage_DoesNotResetIdleTimer_WhenBaseNotCalled()
+    {
+        var timeProvider = new FakeTimeProvider();
+        using var cts = new CancellationTokenSource();
+        var reader = new BlockingStreamReader<TestIncoming>(cts.Token);
+        // NoResetOnReceiveConnection overrides OnMessageReceivedAsync without calling base
+        var connection = new NoResetOnReceiveConnection(
+            _logger, reader, timeProvider,
+            idleTimeout: TimeSpan.FromSeconds(10));
+
+        var runTask = connection.RunAsync(CancellationToken.None);
+
+        timeProvider.Advance(TimeSpan.FromSeconds(11));
+        await connection.KeepAliveManager!.Update(CancellationToken.None);
+
+        await runTask;
+
+        Assert.Equal(CloseReason.Timeout, connection.LastCloseReason);
+    }
+
+    [Fact]
+    public async Task SendAsync_DoesNotResetIdleTimer_ByDefault()
+    {
+        var timeProvider = new FakeTimeProvider();
+        using var cts = new CancellationTokenSource();
+        var reader = new BlockingStreamReader<TestIncoming>(cts.Token);
+        var connection = new DefaultBehaviorConnection(
+            _logger, reader, timeProvider,
+            idleTimeout: TimeSpan.FromSeconds(10));
+
+        var runTask = connection.RunAsync(CancellationToken.None);
+
+        // Advance time and send a message — should NOT reset idle timer
+        timeProvider.Advance(TimeSpan.FromSeconds(8));
+        await connection.SendAsync(new TestOutgoing { Data = "x" }, CancellationToken.None);
+
+        // Advance past timeout from original start
+        timeProvider.Advance(TimeSpan.FromSeconds(3));
+        await connection.KeepAliveManager!.Update(CancellationToken.None);
+
+        await runTask;
+
+        Assert.Equal(CloseReason.Timeout, connection.LastCloseReason);
+    }
+
+    [Fact]
+    public async Task SendAsync_ResetsIdleTimer_WhenOverriddenWithReset()
+    {
+        var timeProvider = new FakeTimeProvider();
+        using var cts = new CancellationTokenSource();
+        var reader = new BlockingStreamReader<TestIncoming>(cts.Token);
+        var connection = new ResetOnSendConnection(
+            _logger, reader, timeProvider,
+            idleTimeout: TimeSpan.FromSeconds(10));
+
+        var runTask = connection.RunAsync(CancellationToken.None);
+
+        // Advance and send — ResetOnSendConnection resets idle timer on send
+        timeProvider.Advance(TimeSpan.FromSeconds(8));
+        await connection.SendAsync(new TestOutgoing { Data = "x" }, CancellationToken.None);
+
+        // 8s since send, still within 10s timeout
+        timeProvider.Advance(TimeSpan.FromSeconds(8));
+        await connection.KeepAliveManager!.Update(CancellationToken.None);
+
+        // Should NOT have timed out — timer was reset by send
+        Assert.False(connection.ConnectionClosed.IsCancellationRequested);
+
+        // Now exceed timeout
+        timeProvider.Advance(TimeSpan.FromSeconds(3));
+        await connection.KeepAliveManager!.Update(CancellationToken.None);
+
+        await runTask;
+
+        Assert.Equal(CloseReason.Timeout, connection.LastCloseReason);
+    }
 }
 
 internal class FakeConnection : StreamConnectionBase<TestIncoming, TestOutgoing>
@@ -291,6 +392,111 @@ internal class FakeConnection : StreamConnectionBase<TestIncoming, TestOutgoing>
         LastCloseReason = args.Reason;
         LastCloseException = args.Exception;
         OnClosed?.Invoke(args);
+    }
+}
+
+/// <summary>
+/// Connection with default base behavior (OnMessageReceivedAsync calls base → ResetIdleTimer).
+/// </summary>
+internal class DefaultBehaviorConnection : StreamConnectionBase<TestIncoming, TestOutgoing>
+{
+    private readonly IAsyncStreamReader<TestIncoming> _reader;
+
+    public CloseReason? LastCloseReason;
+
+    public DefaultBehaviorConnection(
+        ILogger logger,
+        IAsyncStreamReader<TestIncoming> reader,
+        TimeProvider timeProvider,
+        TimeSpan? pingInterval = null,
+        TimeSpan? idleTimeout = null)
+        : base(timeProvider, CancellationToken.None, logger, pingInterval, idleTimeout)
+    {
+        _reader = reader;
+    }
+
+    private protected override IAsyncStreamReader<TestIncoming> GetReader() => _reader;
+    private protected override Task WriteMessageAsync(TestOutgoing message) => Task.CompletedTask;
+    private protected override Task OnCloseAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    protected override Task OnDisposeAsync() => Task.CompletedTask;
+    protected override TestOutgoing CreatePingMessage() => new() { Data = "ping" };
+
+    protected override void OnConnectionClosed(StreamConnectionClosedArgs args)
+    {
+        LastCloseReason = args.Reason;
+    }
+}
+
+/// <summary>
+/// Connection that overrides OnMessageReceivedAsync WITHOUT calling base → idle timer NOT reset on receive.
+/// </summary>
+internal class NoResetOnReceiveConnection : StreamConnectionBase<TestIncoming, TestOutgoing>
+{
+    private readonly IAsyncStreamReader<TestIncoming> _reader;
+
+    public CloseReason? LastCloseReason;
+
+    public NoResetOnReceiveConnection(
+        ILogger logger,
+        IAsyncStreamReader<TestIncoming> reader,
+        TimeProvider timeProvider,
+        TimeSpan? pingInterval = null,
+        TimeSpan? idleTimeout = null)
+        : base(timeProvider, CancellationToken.None, logger, pingInterval, idleTimeout)
+    {
+        _reader = reader;
+    }
+
+    private protected override IAsyncStreamReader<TestIncoming> GetReader() => _reader;
+    private protected override Task WriteMessageAsync(TestOutgoing message) => Task.CompletedTask;
+    private protected override Task OnCloseAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    protected override Task OnDisposeAsync() => Task.CompletedTask;
+    protected override TestOutgoing CreatePingMessage() => new() { Data = "ping" };
+
+    protected override Task OnMessageReceivedAsync(TestIncoming message, CancellationToken cancellationToken)
+        => Task.CompletedTask; // no base call → no idle reset
+
+    protected override void OnConnectionClosed(StreamConnectionClosedArgs args)
+    {
+        LastCloseReason = args.Reason;
+    }
+}
+
+/// <summary>
+/// Connection that overrides SendAsync to reset idle timer before sending.
+/// </summary>
+internal class ResetOnSendConnection : StreamConnectionBase<TestIncoming, TestOutgoing>
+{
+    private readonly IAsyncStreamReader<TestIncoming> _reader;
+
+    public CloseReason? LastCloseReason;
+
+    public ResetOnSendConnection(
+        ILogger logger,
+        IAsyncStreamReader<TestIncoming> reader,
+        TimeProvider timeProvider,
+        TimeSpan? pingInterval = null,
+        TimeSpan? idleTimeout = null)
+        : base(timeProvider, CancellationToken.None, logger, pingInterval, idleTimeout)
+    {
+        _reader = reader;
+    }
+
+    private protected override IAsyncStreamReader<TestIncoming> GetReader() => _reader;
+    private protected override Task WriteMessageAsync(TestOutgoing message) => Task.CompletedTask;
+    private protected override Task OnCloseAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    protected override Task OnDisposeAsync() => Task.CompletedTask;
+    protected override TestOutgoing CreatePingMessage() => new() { Data = "ping" };
+
+    public override async Task SendAsync(TestOutgoing message, CancellationToken cancellationToken)
+    {
+        ResetIdleTimer();
+        await base.SendAsync(message, cancellationToken);
+    }
+
+    protected override void OnConnectionClosed(StreamConnectionClosedArgs args)
+    {
+        LastCloseReason = args.Reason;
     }
 }
 
