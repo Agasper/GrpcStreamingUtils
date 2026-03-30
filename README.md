@@ -202,7 +202,7 @@ Each `StreamConnectionBase` automatically creates a `StreamKeepAliveManager` tha
 
 - Tracks the time of the last received message
 - Periodically sends ping messages (via `CreatePingMessage()`)
-- Closes the connection when `IdleTimeoutSeconds` elapses without messages
+- Closes the connection when the idle timeout elapses without messages
 
 `StreamKeepAliveMonitor` — a `BackgroundService` that checks all registered connections every second and runs their keep-alive logic.
 
@@ -284,7 +284,7 @@ public class NotificationStreamClient
 
 Behavior on disconnect:
 1. Stream breaks → connection dispose → unregister from keep-alive
-2. Waits `InitialReconnectIntervalSeconds` (default 1s)
+2. Waits the initial reconnect interval (default 1s)
 3. Attempts to reconnect
 4. On repeated failure — multiplies delay by backoff multiplier (default 2x) up to max interval (default 60s)
 5. On successful connection — resets backoff
@@ -333,8 +333,8 @@ public interface IOrderService
 
 **Rules:**
 - First parameter — `IMessage` (protobuf message)
-- Second parameter (optional) — `CancellationToken`
-- Return type — `Task` or `Task<T>` where `T : IMessage`
+- Optional parameters — `CancellationToken`, `TimeSpan` / `TimeSpan?` (per-method timeout override)
+- Return type — `Task` or `Task<T>` where `T : IMessage` (`ValueTask` is not supported)
 - Each request message type maps to exactly one method (by protobuf TypeUrl)
 - Methods without parameters **are not supported** — `StreamRpcDispatcher.Create` will throw `ArgumentException`. If you need a call with no data, use an empty protobuf message:
 
@@ -542,7 +542,7 @@ public interface IServerToClientRpc { ... }  // server calls, client handles
 
 // On the server:
 var dispatcher = StreamRpcDispatcher.Create<IClientToServerRpc>(serverHandler, sendResponse);
-var rpcClient = new StreamRpcClient(sendRequest, options);
+var rpcClient = new StreamRpcClient(sendRequest, logger);
 var clientProxy = rpcClient.CreateProxy<IServerToClientRpc>();
 
 // Route incoming messages:
