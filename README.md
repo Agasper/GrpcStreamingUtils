@@ -51,7 +51,7 @@ await stream.RequestStream.WriteAsync(msg2); // from thread B — race condition
 - **Thread-safe writes** — all `SendAsync` calls are serialized via `SemaphoreSlim`
 - **Read loop** — `RunAsync` reads the stream until completion, calling `OnMessageReceivedAsync` for each message
 - **Lifecycle events** — `OnConnectionClosed(CloseReason)` on normal close, timeout, or error
-- **Keep-alive integration** — automatically updates last message time
+- **Keep-alive integration** — idle timer resets on incoming messages by default; configurable for outgoing
 - **Proper dispose** — cancel, resource cleanup, waiting for pending writes
 
 ```csharp
@@ -88,9 +88,10 @@ public class MyClientConnection : ClientStreamConnection<ServerMessage, ClientMe
     protected override ClientMessage CreatePingMessage()
         => new ClientMessage { Ping = new Ping() };
 
-    // Called for every incoming message
+    // Called for every incoming message (base call resets idle timer)
     protected override Task OnMessageReceivedAsync(ServerMessage message, CancellationToken ct)
     {
+        base.OnMessageReceivedAsync(message, ct);
         _onMessage(message);
         return Task.CompletedTask;
     }
@@ -217,6 +218,35 @@ _keepAliveMonitor.Unregister(connection); // stop monitoring
 ```
 
 Closed connections are automatically removed from monitoring.
+
+### Idle Timer Reset Behavior
+
+By default, the idle timer resets on **incoming messages** (via `OnMessageReceivedAsync` base implementation). Outgoing messages do **not** reset the timer.
+
+You can customize this behavior:
+
+**Disable idle reset on incoming messages** — override `OnMessageReceivedAsync` without calling `base`:
+
+```csharp
+protected override Task OnMessageReceivedAsync(ServerMessage message, CancellationToken ct)
+{
+    // No base call → idle timer will NOT reset on incoming messages
+    HandleMessage(message);
+    return Task.CompletedTask;
+}
+```
+
+**Enable idle reset on outgoing messages** — override `SendAsync` and call `ResetIdleTimer()`:
+
+```csharp
+public override async Task SendAsync(ClientMessage message, CancellationToken ct)
+{
+    ResetIdleTimer();
+    await base.SendAsync(message, ct);
+}
+```
+
+`ResetIdleTimer()` is a protected method available in any `StreamConnectionBase` subclass. You can call it from any override to manually reset the idle timer.
 
 ---
 
