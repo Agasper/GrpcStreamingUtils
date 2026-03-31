@@ -12,5 +12,7 @@ public interface IStreamConnection<TIncoming, TOutgoing> : IAsyncDisposable
 
     Task SendAsync(TOutgoing message, CancellationToken cancellationToken);
 
+    Task<bool> TrySendAsync(TOutgoing message, CancellationToken cancellationToken);
+
     Task CloseAsync(CancellationToken cancellationToken);
 }

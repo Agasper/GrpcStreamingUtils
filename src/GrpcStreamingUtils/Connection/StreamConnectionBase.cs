@@ -123,9 +123,31 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
 
             await WriteMessageAsync(message).ConfigureAwait(false);
         }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await CloseCoreAsync(CloseReason.Error, ex).ConfigureAwait(false);
+            throw;
+        }
         finally
         {
             _writeLock.Release();
+        }
+    }
+
+    public async Task<bool> TrySendAsync(TOutgoing message, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await SendAsync(message, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return false;
         }
     }
 

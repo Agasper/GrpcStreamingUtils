@@ -222,6 +222,78 @@ public class StreamConnectionBaseTests
     }
 
     [Fact]
+    public async Task SendAsync_WriteFailure_ClosesConnection()
+    {
+        var connection = new FakeConnection(_logger, Array.Empty<TestIncoming>());
+        connection.WriteDelay = () => throw new InvalidOperationException("write failed");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            connection.SendAsync(new TestOutgoing { Data = "x" }, CancellationToken.None));
+
+        Assert.True(connection.ConnectionClosed.IsCancellationRequested);
+        Assert.True(connection.IsClosed);
+        Assert.Equal(CloseReason.Error, connection.LastCloseReason);
+        Assert.Equal("write failed", connection.LastCloseException!.Message);
+    }
+
+    [Fact]
+    public async Task SendAsync_WriteFailure_RethrowsException()
+    {
+        var connection = new FakeConnection(_logger, Array.Empty<TestIncoming>());
+        connection.WriteDelay = () => throw new InvalidOperationException("boom");
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            connection.SendAsync(new TestOutgoing { Data = "x" }, CancellationToken.None));
+
+        Assert.Equal("boom", ex.Message);
+    }
+
+    [Fact]
+    public async Task TrySendAsync_Success_ReturnsTrue()
+    {
+        var connection = new FakeConnection(_logger, Array.Empty<TestIncoming>());
+
+        var result = await connection.TrySendAsync(new TestOutgoing { Data = "x" }, CancellationToken.None);
+
+        Assert.True(result);
+        Assert.Equal("x", connection.WrittenMessages[0].Data);
+    }
+
+    [Fact]
+    public async Task TrySendAsync_WriteFailure_ReturnsFalse()
+    {
+        var connection = new FakeConnection(_logger, Array.Empty<TestIncoming>());
+        connection.WriteDelay = () => throw new InvalidOperationException("write failed");
+
+        var result = await connection.TrySendAsync(new TestOutgoing { Data = "x" }, CancellationToken.None);
+
+        Assert.False(result);
+    }
+
+    [Fact]
+    public async Task TrySendAsync_WriteFailure_ClosesConnection()
+    {
+        var connection = new FakeConnection(_logger, Array.Empty<TestIncoming>());
+        connection.WriteDelay = () => throw new InvalidOperationException("write failed");
+
+        await connection.TrySendAsync(new TestOutgoing { Data = "x" }, CancellationToken.None);
+
+        Assert.True(connection.ConnectionClosed.IsCancellationRequested);
+        Assert.True(connection.IsClosed);
+    }
+
+    [Fact]
+    public async Task TrySendAsync_CallerCancellation_Throws()
+    {
+        var connection = new FakeConnection(_logger, Array.Empty<TestIncoming>());
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            connection.TrySendAsync(new TestOutgoing { Data = "x" }, cts.Token));
+    }
+
+    [Fact]
     public async Task IncomingMessage_ResetsIdleTimer_ByDefault()
     {
         var timeProvider = new FakeTimeProvider();
