@@ -10,7 +10,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Google.Protobuf" Version="3.29.6" />
+    <PackageReference Include="Grpc.AspNetCore" Version="2.70.0" />
+    <PackageReference Include="Grpc.Net.Client" Version="2.70.0" />
     <PackageReference Include="Grpc.Tools" Version="2.70.0" PrivateAssets="All" />
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.4.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
@@ -25,6 +31,7 @@
 
   <ItemGroup>
     <Protobuf Include="Proto\test_messages.proto" GrpcServices="None" />
+    <Protobuf Include="Proto\e2e_service.proto" GrpcServices="Both" AdditionalImportDirs="..\..\src\GrpcStreamingUtils" />
   </ItemGroup>
 
 </Project>

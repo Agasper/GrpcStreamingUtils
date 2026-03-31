@@ -1,0 +1,19 @@
+syntax = "proto3";
+package grpc_streaming_utils.tests;
+option csharp_namespace = "GrpcStreamingUtils.Tests.Proto";
+
+import "Proto/streaming_rpc.proto";
+
+service TestStreamService {
+  rpc BiDirectionalStream (stream TestStreamMessage) returns (stream TestStreamMessage);
+}
+
+message TestStreamMessage {
+  oneof content {
+    grpc_streaming_utils.RequestEnvelope rpc_request = 1;
+    grpc_streaming_utils.ResponseEnvelope rpc_response = 2;
+    Ping ping = 3;
+  }
+}
+
+message Ping {}
