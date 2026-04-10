@@ -14,8 +14,9 @@ public abstract class ClientStreamConnection<TIncoming, TOutgoing> : StreamConne
         TimeProvider timeProvider,
         ILogger logger,
         TimeSpan? pingInterval = null,
-        TimeSpan? idleTimeout = null)
-        : base(timeProvider, CancellationToken.None, logger, pingInterval, idleTimeout)
+        TimeSpan? idleTimeout = null,
+        StreamConnectionContext? connectionContext = null)
+        : base(timeProvider, CancellationToken.None, logger, pingInterval, idleTimeout, connectionContext)
     {
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
     }

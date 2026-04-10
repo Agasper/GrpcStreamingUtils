@@ -17,8 +17,9 @@ public abstract class ServerStreamConnection<TIncoming, TOutgoing> : StreamConne
         CancellationToken grpcCallCancellation,
         ILogger logger,
         TimeSpan? pingInterval = null,
-        TimeSpan? idleTimeout = null)
-        : base(timeProvider, grpcCallCancellation, logger, pingInterval, idleTimeout)
+        TimeSpan? idleTimeout = null,
+        StreamConnectionContext? connectionContext = null)
+        : base(timeProvider, grpcCallCancellation, logger, pingInterval, idleTimeout, connectionContext)
     {
         _requestStream = requestStream ?? throw new ArgumentNullException(nameof(requestStream));
         _responseStream = responseStream ?? throw new ArgumentNullException(nameof(responseStream));

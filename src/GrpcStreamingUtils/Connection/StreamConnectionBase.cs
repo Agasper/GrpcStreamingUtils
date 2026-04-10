@@ -28,6 +28,7 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
     private volatile bool _timedOut;
 
     protected readonly ILogger _logger;
+    private readonly StreamConnectionContext? _connectionContext;
     private readonly CancellationTokenSource _connectionCts;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private int _disposed;
@@ -39,10 +40,12 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
         CancellationToken externalCancellation,
         ILogger logger,
         TimeSpan? pingInterval = null,
-        TimeSpan? idleTimeout = null)
+        TimeSpan? idleTimeout = null,
+        StreamConnectionContext? connectionContext = null)
         : base(Guid.NewGuid())
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _connectionContext = connectionContext;
         _connectionCts = CancellationTokenSource.CreateLinkedTokenSource(externalCancellation);
 
         if (pingInterval.HasValue || idleTimeout.HasValue)
@@ -80,8 +83,6 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
         return Task.CompletedTask;
     }
 
-    protected virtual string? FormatMessage<T>(T message) => message?.ToString();
-
     protected virtual void OnConnectionClosed(StreamConnectionClosedArgs args) { }
 
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -93,8 +94,8 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
         {
             await foreach (var message in GetReader().ReadAllAsync(linkedToken).ConfigureAwait(false))
             {
-                if (_logger.IsEnabled(LogLevel.Debug))
-                    _logger.LogDebug("Stream received: {Message}", FormatMessage(message));
+                _connectionContext?.GrpcLogger.LogStreamPacketReceived(
+                    _connectionContext.GrpcMethodName, message);
 
                 await OnMessageReceivedAsync(message, linkedToken).ConfigureAwait(false);
             }
@@ -128,8 +129,8 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
 
             await WriteMessageAsync(message).ConfigureAwait(false);
 
-            if (_logger.IsEnabled(LogLevel.Debug))
-                _logger.LogDebug("Stream sent: {Message}", FormatMessage(message));
+            _connectionContext?.GrpcLogger.LogStreamPacketSent(
+                _connectionContext.GrpcMethodName, message);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
