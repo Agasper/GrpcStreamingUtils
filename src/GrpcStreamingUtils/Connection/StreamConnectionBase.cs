@@ -80,6 +80,8 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
         return Task.CompletedTask;
     }
 
+    protected virtual string? FormatMessage<T>(T message) => message?.ToString();
+
     protected virtual void OnConnectionClosed(StreamConnectionClosedArgs args) { }
 
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -91,6 +93,9 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
         {
             await foreach (var message in GetReader().ReadAllAsync(linkedToken).ConfigureAwait(false))
             {
+                if (_logger.IsEnabled(LogLevel.Debug))
+                    _logger.LogDebug("Stream received: {Message}", FormatMessage(message));
+
                 await OnMessageReceivedAsync(message, linkedToken).ConfigureAwait(false);
             }
 
@@ -122,6 +127,9 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
                 throw new OperationCanceledException("Connection is closed.");
 
             await WriteMessageAsync(message).ConfigureAwait(false);
+
+            if (_logger.IsEnabled(LogLevel.Debug))
+                _logger.LogDebug("Stream sent: {Message}", FormatMessage(message));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
