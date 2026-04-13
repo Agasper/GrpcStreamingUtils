@@ -12,6 +12,7 @@ public static class GrpcLoggingSetup
             configuration.GetSection($"Logging:{GrpcLoggingConfiguration.SectionName}"));
 
         services.TryAddSingleton<GrpcLogger>();
+        services.TryAddSingleton<GrpcClientLoggingInterceptor>();
 
         return services;
     }

@@ -4,11 +4,11 @@ using Grpc.Core.Interceptors;
 
 namespace Niarru.GrpcStreamingUtils.Logging;
 
-public abstract class GrpcClientLoggingInterceptorBase : Interceptor
+public class GrpcClientLoggingInterceptor : Interceptor
 {
     private readonly GrpcLogger _grpcLogger;
 
-    protected GrpcClientLoggingInterceptorBase(GrpcLogger grpcLogger)
+    public GrpcClientLoggingInterceptor(GrpcLogger grpcLogger)
     {
         _grpcLogger = grpcLogger ?? throw new ArgumentNullException(nameof(grpcLogger));
     }
@@ -34,7 +34,7 @@ public abstract class GrpcClientLoggingInterceptorBase : Interceptor
         ClientInterceptorContext<TRequest, TResponse> context,
         AsyncServerStreamingCallContinuation<TRequest, TResponse> continuation)
     {
-        _grpcLogger.LogStreamingStart("Client: server streaming", context.Method.FullName);
+        _grpcLogger.LogStreamingStart("Client stream", context.Method.FullName);
         return continuation(request, context);
     }
 
@@ -45,7 +45,7 @@ public abstract class GrpcClientLoggingInterceptorBase : Interceptor
         var stopwatch = Stopwatch.StartNew();
         var methodName = context.Method.FullName;
 
-        _grpcLogger.LogStreamingStart("Client: client streaming", methodName);
+        _grpcLogger.LogStreamingStart("Client stream", methodName);
 
         var call = continuation(context);
 
@@ -62,8 +62,25 @@ public abstract class GrpcClientLoggingInterceptorBase : Interceptor
         ClientInterceptorContext<TRequest, TResponse> context,
         AsyncDuplexStreamingCallContinuation<TRequest, TResponse> continuation)
     {
-        _grpcLogger.LogStreamingStart("Client: duplex streaming", context.Method.FullName);
-        return continuation(context);
+        var stopwatch = Stopwatch.StartNew();
+        var methodName = context.Method.FullName;
+
+        _grpcLogger.LogStreamingStart("Client stream", methodName);
+
+        var call = continuation(context);
+
+        return new AsyncDuplexStreamingCall<TRequest, TResponse>(
+            call.RequestStream,
+            call.ResponseStream,
+            call.ResponseHeadersAsync,
+            call.GetStatus,
+            call.GetTrailers,
+            () =>
+            {
+                stopwatch.Stop();
+                _grpcLogger.LogStreamingEnd("Client stream", methodName, stopwatch.ElapsedMilliseconds);
+                call.Dispose();
+            });
     }
 
     private async Task<TResponse> HandleUnaryResponse<TRequest, TResponse>(
@@ -76,7 +93,7 @@ public abstract class GrpcClientLoggingInterceptorBase : Interceptor
         {
             var response = await responseTask.ConfigureAwait(false);
             stopwatch.Stop();
-            _grpcLogger.LogUnaryCall(methodName, request, response, stopwatch.ElapsedMilliseconds);
+            _grpcLogger.LogUnaryCall(methodName, request, response, stopwatch.ElapsedMilliseconds, prefix: "Client");
             return response;
         }
         catch (Exception ex)
@@ -89,7 +106,7 @@ public abstract class GrpcClientLoggingInterceptorBase : Interceptor
                 ? exId
                 : Guid.NewGuid();
 
-            _grpcLogger.LogUnaryError(methodName, request, ex, exceptionId, stopwatch.ElapsedMilliseconds);
+            _grpcLogger.LogUnaryError(methodName, request, ex, exceptionId, stopwatch.ElapsedMilliseconds, prefix: "Client");
             throw;
         }
     }
@@ -103,7 +120,7 @@ public abstract class GrpcClientLoggingInterceptorBase : Interceptor
         {
             var response = await responseTask.ConfigureAwait(false);
             stopwatch.Stop();
-            _grpcLogger.LogStreamingEnd("Client: client streaming", methodName, stopwatch.ElapsedMilliseconds);
+            _grpcLogger.LogStreamingEnd("Client stream", methodName, stopwatch.ElapsedMilliseconds);
             return response;
         }
         catch (Exception ex)
@@ -116,7 +133,7 @@ public abstract class GrpcClientLoggingInterceptorBase : Interceptor
                 ? exId
                 : Guid.NewGuid();
 
-            _grpcLogger.LogStreamingError("Client: client streaming", methodName, ex, exceptionId,
+            _grpcLogger.LogStreamingError("Client stream", methodName, ex, exceptionId,
                 stopwatch.ElapsedMilliseconds);
             throw;
         }

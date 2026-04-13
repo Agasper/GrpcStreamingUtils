@@ -30,6 +30,7 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
     private volatile bool _timedOut;
 
     protected readonly ILogger _logger;
+    private readonly GrpcLogger? _grpcLogger;
     private readonly GrpcLoggingConfiguration? _grpcLoggingConfig;
     private readonly CancellationTokenSource _connectionCts;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
@@ -43,10 +44,12 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
         ILogger logger,
         TimeSpan? pingInterval = null,
         TimeSpan? idleTimeout = null,
-        GrpcLoggingConfiguration? grpcLoggingConfig = null)
+        GrpcLoggingConfiguration? grpcLoggingConfig = null,
+        GrpcLogger? grpcLogger = null)
         : base(Guid.NewGuid())
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _grpcLogger = grpcLogger;
         _grpcLoggingConfig = grpcLoggingConfig;
         _connectionCts = CancellationTokenSource.CreateLinkedTokenSource(externalCancellation);
 
@@ -199,6 +202,12 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
 
     private void LogPacketReceived<T>(T message)
     {
+        if (_grpcLogger != null)
+        {
+            _grpcLogger.LogStreamPacketReceived(ConnectionId, message);
+            return;
+        }
+
         if (!_logger.IsEnabled(LogLevel.Debug)) return;
 
         using (_logger.BeginConnectionScope(ConnectionId))
@@ -212,6 +221,12 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
 
     private void LogPacketSent<T>(T message)
     {
+        if (_grpcLogger != null)
+        {
+            _grpcLogger.LogStreamPacketSent(ConnectionId, message);
+            return;
+        }
+
         if (!_logger.IsEnabled(LogLevel.Debug)) return;
 
         using (_logger.BeginConnectionScope(ConnectionId))

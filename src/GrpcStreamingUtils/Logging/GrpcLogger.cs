@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Niarru.GrpcStreamingUtils;
 using Niarru.Logging;
 using Niarru.Logging.Utils;
 
@@ -20,30 +21,45 @@ public class GrpcLogger
 
     public void LogUnaryCall<TRequest, TResponse>(
         string method, TRequest request, TResponse response, long durationMs,
-        string? callerId = null, string? peer = null)
+        string? callerId = null, string? peer = null, string? prefix = null)
     {
         if (!_logger.IsEnabled(LogLevel.Debug)) return;
 
         using (_logger.BeginScope(BuildScope(method, durationMs, callerId, peer)))
         {
             if (_config.LogGrpcMessageBody)
-                _logger.LogDebug("{Method}(): {Request} -> {Response}",
-                    GetMethodShort(method), SensitiveDataRedactor.Redact(request), SensitiveDataRedactor.Redact(response));
+            {
+                if (prefix != null)
+                    _logger.LogDebug("{Prefix} {Method}(): {Request} -> {Response}",
+                        prefix, GetMethodShort(method), SensitiveDataRedactor.Redact(request), SensitiveDataRedactor.Redact(response));
+                else
+                    _logger.LogDebug("{Method}(): {Request} -> {Response}",
+                        GetMethodShort(method), SensitiveDataRedactor.Redact(request), SensitiveDataRedactor.Redact(response));
+            }
             else
-                _logger.LogDebug("{Method}()", GetMethodShort(method));
+            {
+                if (prefix != null)
+                    _logger.LogDebug("{Prefix} {Method}()", prefix, GetMethodShort(method));
+                else
+                    _logger.LogDebug("{Method}()", GetMethodShort(method));
+            }
         }
     }
 
     public void LogUnaryError<TRequest>(
         string method, TRequest request, Exception ex, Guid exceptionId, long durationMs,
-        string? callerId = null, string? peer = null)
+        string? callerId = null, string? peer = null, string? prefix = null)
     {
         if (!_logger.IsEnabled(LogLevel.Warning) || ex is OperationCanceledException) return;
 
         using (_logger.BeginScope(BuildScope(method, durationMs, callerId, peer).AddExceptionId(exceptionId)))
         {
-            _logger.LogError(ex, "{Method}(): ({ExceptionType}) {ExceptionMessage}",
-                GetMethodShort(method), ex.GetType().Name, ex.Message);
+            if (prefix != null)
+                _logger.LogError(ex, "{Prefix} {Method}(): ({ExceptionType}) {ExceptionMessage}",
+                    prefix, GetMethodShort(method), ex.GetType().Name, ex.Message);
+            else
+                _logger.LogError(ex, "{Method}(): ({ExceptionType}) {ExceptionMessage}",
+                    GetMethodShort(method), ex.GetType().Name, ex.Message);
         }
     }
 
@@ -97,11 +113,37 @@ public class GrpcLogger
         }
     }
 
+    public void LogStreamPacketSent<T>(Guid connectionId, T message)
+    {
+        if (!_logger.IsEnabled(LogLevel.Debug)) return;
+
+        using (_logger.BeginConnectionScope(connectionId))
+        {
+            if (_config.LogGrpcMessageBody)
+                _logger.LogDebug("Streaming packet sent: {Message}", SensitiveDataRedactor.Redact(message));
+            else
+                _logger.LogDebug("Streaming packet sent: {MessageType}", typeof(T).Name);
+        }
+    }
+
     public void LogStreamPacketReceived<T>(string method, T message)
     {
         if (!_logger.IsEnabled(LogLevel.Debug)) return;
 
         using (_logger.BeginScope(new LoggingScope().AddMethod(method)))
+        {
+            if (_config.LogGrpcMessageBody)
+                _logger.LogDebug("Streaming packet received: {Message}", SensitiveDataRedactor.Redact(message));
+            else
+                _logger.LogDebug("Streaming packet received: {MessageType}", typeof(T).Name);
+        }
+    }
+
+    public void LogStreamPacketReceived<T>(Guid connectionId, T message)
+    {
+        if (!_logger.IsEnabled(LogLevel.Debug)) return;
+
+        using (_logger.BeginConnectionScope(connectionId))
         {
             if (_config.LogGrpcMessageBody)
                 _logger.LogDebug("Streaming packet received: {Message}", SensitiveDataRedactor.Redact(message));

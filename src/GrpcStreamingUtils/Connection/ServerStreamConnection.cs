@@ -19,8 +19,9 @@ public abstract class ServerStreamConnection<TIncoming, TOutgoing> : StreamConne
         ILogger logger,
         TimeSpan? pingInterval = null,
         TimeSpan? idleTimeout = null,
-        GrpcLoggingConfiguration? grpcLoggingConfig = null)
-        : base(timeProvider, grpcCallCancellation, logger, pingInterval, idleTimeout, grpcLoggingConfig)
+        GrpcLoggingConfiguration? grpcLoggingConfig = null,
+        GrpcLogger? grpcLogger = null)
+        : base(timeProvider, grpcCallCancellation, logger, pingInterval, idleTimeout, grpcLoggingConfig, grpcLogger)
     {
         _requestStream = requestStream ?? throw new ArgumentNullException(nameof(requestStream));
         _responseStream = responseStream ?? throw new ArgumentNullException(nameof(responseStream));
