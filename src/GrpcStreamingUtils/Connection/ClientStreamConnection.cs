@@ -1,5 +1,6 @@
 using Grpc.Core;
 using Microsoft.Extensions.Logging;
+using Niarru.GrpcStreamingUtils.Logging;
 
 namespace Niarru.GrpcStreamingUtils.Connection;
 
@@ -15,8 +16,8 @@ public abstract class ClientStreamConnection<TIncoming, TOutgoing> : StreamConne
         ILogger logger,
         TimeSpan? pingInterval = null,
         TimeSpan? idleTimeout = null,
-        StreamConnectionContext? connectionContext = null)
-        : base(timeProvider, CancellationToken.None, logger, pingInterval, idleTimeout, connectionContext)
+        GrpcLoggingConfiguration? grpcLoggingConfig = null)
+        : base(timeProvider, CancellationToken.None, logger, pingInterval, idleTimeout, grpcLoggingConfig)
     {
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
     }

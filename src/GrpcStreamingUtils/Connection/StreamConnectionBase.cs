@@ -1,6 +1,8 @@
 using Niarru.GrpcStreamingUtils.KeepAlive;
+using Niarru.GrpcStreamingUtils.Logging;
 using Grpc.Core;
 using Microsoft.Extensions.Logging;
+using Niarru.Logging.Utils;
 
 namespace Niarru.GrpcStreamingUtils.Connection;
 
@@ -28,7 +30,7 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
     private volatile bool _timedOut;
 
     protected readonly ILogger _logger;
-    private readonly StreamConnectionContext? _connectionContext;
+    private readonly GrpcLoggingConfiguration? _grpcLoggingConfig;
     private readonly CancellationTokenSource _connectionCts;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private int _disposed;
@@ -41,11 +43,11 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
         ILogger logger,
         TimeSpan? pingInterval = null,
         TimeSpan? idleTimeout = null,
-        StreamConnectionContext? connectionContext = null)
+        GrpcLoggingConfiguration? grpcLoggingConfig = null)
         : base(Guid.NewGuid())
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _connectionContext = connectionContext;
+        _grpcLoggingConfig = grpcLoggingConfig;
         _connectionCts = CancellationTokenSource.CreateLinkedTokenSource(externalCancellation);
 
         if (pingInterval.HasValue || idleTimeout.HasValue)
@@ -94,8 +96,7 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
         {
             await foreach (var message in GetReader().ReadAllAsync(linkedToken).ConfigureAwait(false))
             {
-                _connectionContext?.GrpcLogger.LogStreamPacketReceived(
-                    _connectionContext.GrpcMethodName, message);
+                LogPacketReceived(message);
 
                 await OnMessageReceivedAsync(message, linkedToken).ConfigureAwait(false);
             }
@@ -129,8 +130,7 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
 
             await WriteMessageAsync(message).ConfigureAwait(false);
 
-            _connectionContext?.GrpcLogger.LogStreamPacketSent(
-                _connectionContext.GrpcMethodName, message);
+            LogPacketSent(message);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -194,6 +194,32 @@ public abstract class StreamConnectionBase<TIncoming, TOutgoing> : StreamConnect
             {
                 _logger.LogWarning(ex, "Error in OnConnectionClosed handler");
             }
+        }
+    }
+
+    private void LogPacketReceived<T>(T message)
+    {
+        if (!_logger.IsEnabled(LogLevel.Debug)) return;
+
+        using (_logger.BeginConnectionScope(ConnectionId))
+        {
+            if (_grpcLoggingConfig?.LogGrpcMessageBody != false)
+                _logger.LogDebug("Streaming packet received: {Message}", SensitiveDataRedactor.Redact(message));
+            else
+                _logger.LogDebug("Streaming packet received: {MessageType}", typeof(T).Name);
+        }
+    }
+
+    private void LogPacketSent<T>(T message)
+    {
+        if (!_logger.IsEnabled(LogLevel.Debug)) return;
+
+        using (_logger.BeginConnectionScope(ConnectionId))
+        {
+            if (_grpcLoggingConfig?.LogGrpcMessageBody != false)
+                _logger.LogDebug("Streaming packet sent: {Message}", SensitiveDataRedactor.Redact(message));
+            else
+                _logger.LogDebug("Streaming packet sent: {MessageType}", typeof(T).Name);
         }
     }
 
