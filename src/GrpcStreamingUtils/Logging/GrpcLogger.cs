@@ -2,7 +2,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Niarru.GrpcStreamingUtils;
 using Niarru.Logging;
-using Niarru.Logging.Utils;
+using Niarru.GrpcStreamingUtils.Logging;
 
 namespace Niarru.GrpcStreamingUtils.Logging;
 

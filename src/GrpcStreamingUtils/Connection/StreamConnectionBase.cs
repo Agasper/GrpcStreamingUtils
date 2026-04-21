@@ -2,7 +2,6 @@ using Niarru.GrpcStreamingUtils.KeepAlive;
 using Niarru.GrpcStreamingUtils.Logging;
 using Grpc.Core;
 using Microsoft.Extensions.Logging;
-using Niarru.Logging.Utils;
 
 namespace Niarru.GrpcStreamingUtils.Connection;
 

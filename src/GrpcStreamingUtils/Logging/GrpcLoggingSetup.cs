@@ -8,8 +8,12 @@ public static class GrpcLoggingSetup
 {
     public static IServiceCollection AddNiarruGrpcLogging(this IServiceCollection services, IConfiguration configuration)
     {
-        services.Configure<GrpcLoggingConfiguration>(
-            configuration.GetSection($"Logging:{GrpcLoggingConfiguration.SectionName}"));
+        var section = configuration.GetSection($"Logging:{GrpcLoggingConfiguration.SectionName}");
+        services.Configure<GrpcLoggingConfiguration>(section);
+
+        var config = new GrpcLoggingConfiguration();
+        section.Bind(config);
+        SensitiveDataRedactor.SkipDefaultFields = config.SkipDefaultFields;
 
         services.TryAddSingleton<GrpcLogger>();
         services.TryAddSingleton<GrpcClientLoggingInterceptor>();
